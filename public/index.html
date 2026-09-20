@@ -109,6 +109,20 @@
   .market-chip .m-value { font-size: 13px; font-weight: bold; margin-top: 1px; }
   .market-chip .m-change { font-size: 10px; font-weight: bold; margin-top: 1px; }
 
+  .tag {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: bold;
+    color: #FFFFFF;
+    padding: 3px 9px;
+    border-radius: 999px;
+  }
+  .tag.golden { background: #C74B3C; }
+  .tag.dead { background: #2F6FB0; }
+  .tag.rsi-high { background: #B8894A; }
+  .tag.rsi-low { background: #4A8FB8; }
+  .tag.neutral { background: #8A8478; }
+
   .add-form {
     background: #FFFFFF;
     border: 1px dashed #B8B2A3;
@@ -187,6 +201,10 @@
     <div class="section-title">関連ニュース見出し</div>
     <div class="section-note">※AIによる推測は行っていません。見出しの一覧です。</div>
     <div id="stocksNews" class="loading">読み込み中...</div>
+
+    <div class="section-title">テクニカル分析(参考情報)</div>
+    <div class="section-note">※RSI・移動平均線に基づくシグナルです。売買の推奨ではありません。データは約3ヶ月前時点のものです。</div>
+    <div id="stocksTechnical" class="loading">読み込み中...</div>
   </div>
 
   <div id="view-orcan" style="display:none;">
@@ -579,6 +597,73 @@ async function loadOrcan() {
 }
 
 // ============================================================
+// テクニカル分析
+// ============================================================
+
+function tagClassFor(signal) {
+  if (signal === 'ゴールデンクロス') return 'golden';
+  if (signal === 'デッドクロス') return 'dead';
+  if (signal === 'RSI高水準') return 'rsi-high';
+  if (signal === 'RSI低水準') return 'rsi-low';
+  return 'neutral';
+}
+
+async function loadTechnicals() {
+  const el = document.getElementById('stocksTechnical');
+  try {
+    const res = await fetch('/api/technicals');
+    const data = await res.json();
+    if (!data.technicals) throw new Error('データの形式が想定と違います');
+
+    el.innerHTML = '';
+
+    if (data.technicals.length === 0) {
+      el.innerHTML = '<div class="loading">保有銘柄がまだ登録されていません</div>';
+      return;
+    }
+
+    data.technicals.forEach((t) => {
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      if (!t.technical) {
+        card.innerHTML = `
+          <div class="row">
+            <div class="name">${t.name}</div>
+          </div>
+          <div class="error-box" style="margin-top:8px;">テクニカル分析の取得に失敗しました: ${t.error || '不明なエラー'}</div>
+        `;
+        el.appendChild(card);
+        return;
+      }
+
+      const tc = t.technical;
+      card.innerHTML = `
+        <div class="row">
+          <div>
+            <div class="name">${t.name}</div>
+            <div class="code">${t.code}</div>
+          </div>
+          <div class="tag ${tagClassFor(tc.signal)}">${tc.signal}</div>
+        </div>
+        <div class="divider"></div>
+        <div class="indicators">
+          <div><div class="indicator-label">RSI(14)</div><div class="indicator-value">${tc.rsi != null ? tc.rsi : '--'}</div></div>
+          <div><div class="indicator-label">25日線</div><div class="indicator-value">${tc.ma25 != null ? fmtNum(tc.ma25) : '--'}</div></div>
+          <div><div class="indicator-label">75日線</div><div class="indicator-value">${tc.ma75 != null ? fmtNum(tc.ma75) : '--'}</div></div>
+          <div><div class="indicator-label">出来高(平均比)</div><div class="indicator-value">${tc.volumeRatioPct != null ? tc.volumeRatioPct + '%' : '--'}</div></div>
+        </div>
+        <div class="section-note" style="margin:8px 0 0;">${tc.comment}</div>
+        <div class="asof">データ基準日: ${tc.asOfDate}</div>
+      `;
+      el.appendChild(card);
+    });
+  } catch (err) {
+    el.innerHTML = `<div class="error-box">テクニカル分析の取得に失敗しました: ${err.message}</div>`;
+  }
+}
+
+// ============================================================
 // 市場の経済指標
 // ============================================================
 
@@ -624,6 +709,7 @@ async function refreshAll() {
   loadOrcan();
   loadOrcanNews();
   loadMarket();
+  loadTechnicals();
 }
 
 refreshAll();
