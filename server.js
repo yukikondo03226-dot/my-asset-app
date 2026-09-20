@@ -2,18 +2,20 @@
 // マイ資産アプリ バックエンドサーバー
 // ------------------------------------------------------------
 // このファイルが行うこと:
-//   1. 保有銘柄・オルカンの保有状況を、サーバー側のファイル(data/holdings.json)
-//      に保存する。これにより、Safariで開いてもホーム画面のアイコンから
-//      開いても、いつも同じ内容が表示されます。
+//   1. 保有銘柄・オルカンの保有状況を、JSONBin.ioという無料の外部保存
+//      サービスに保存する。コードを更新して再デプロイしても、
+//      Safariで開いてもホーム画面のアイコンから開いても、
+//      いつも同じ内容が表示されます。
 //   2. 松井証券の公開株価ページから、保有している日本株の
 //      「今日に近い」株価・前日比・PER等を取得する
 //      (※非公式な方法です。下の「注意」を必ずお読みください)
-//   3. J-Quants から、同じ銘柄のPER/PBRの「約3ヶ月前時点」のデータを取得する
-//      (長期的な指標の推移を見るための参考値として使います)
+//   3. J-Quants から、同じ銘柄のPER/PBRの「約3ヶ月前時点」のデータや、
+//      テクニカル分析(RSI・移動平均線)用の値動きの履歴を取得する
 //   4. 三菱UFJアセットマネジメントの公開APIから、オルカンの
 //      基準価額・純資産総額などを取得する(こちらは最新・公式データ)
 //   5. NewsAPI から、保有銘柄や世界経済に関するニュース見出しを取得する
 //      (AIによる要約・推測は行わず、見出しの一覧のみを返します)
+//   6. 日経平均(松井証券)・USD/JPY(無料の為替API)などの市場指標を取得する
 //
 // ★重要な注意(2番について)
 // 松井証券のページは公式にAPIを提供していないため、ページのHTMLを
@@ -23,11 +25,6 @@
 //   - 個人が少ない頻度(1日に数回程度)でアクセスする分には実務上大きな問題に
 //     なるケースは少ないとされますが、リスクを理解した上でご利用ください
 //   - 動かなくなった場合はエラーメッセージを教えてください。一緒に直しましょう
-//
-// ★注意(1番について)
-// data/holdings.json は、サーバーの中に保存される普通のファイルです。
-// Renderの無料プランでは、長時間使われないと自動で作り直される(＝保存内容が
-// リセットされる)ことがあります。大事な数字は、念のためどこかにメモしておくと安心です。
 // ============================================================
 
 require('dotenv').config();
@@ -35,7 +32,6 @@ const express = require('express');
 const cors = require('cors');
 const cheerio = require('cheerio');
 const path = require('path');
-const fs = require('fs');
 
 const app = express();
 app.use(cors());
@@ -50,10 +46,13 @@ const NEWSAPI_KEY = process.env.NEWSAPI_KEY;
 const ORCAN_FUND_CODE = '0331418A';
 
 // ------------------------------------------------------------
-// 保有一覧表(サーバー側のファイルに保存します)
+// 保有一覧表(JSONBin.ioという無料の外部保存サービスに保存します)
+// サーバー内のファイルではなく外部に保存することで、コードを更新して
+// 再デプロイしても、保有銘柄のデータが消えないようにしています。
 // ------------------------------------------------------------
-const DATA_DIR = path.join(__dirname, 'data');
-const HOLDINGS_FILE = path.join(DATA_DIR, 'holdings.json');
+const JSONBIN_BIN_ID = process.env.JSONBIN_BIN_ID;
+const JSONBIN_API_KEY = process.env.JSONBIN_API_KEY;
+const JSONBIN_BASE = 'https://api.jsonbin.io/v3/b';
 
 const DEFAULT_HOLDINGS = {
   stocks: [
@@ -64,25 +63,38 @@ const DEFAULT_HOLDINGS = {
   orcan: { principal: null, units: null }
 };
 
-function loadHoldings() {
+async function loadHoldings() {
   try {
-    if (!fs.existsSync(HOLDINGS_FILE)) {
-      saveHoldings(DEFAULT_HOLDINGS);
-      return DEFAULT_HOLDINGS;
+    const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_BIN_ID}/latest`, {
+      headers: { 'X-Master-Key': JSONBIN_API_KEY }
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`JSONBin 読み込みエラー: ${res.status} ${text}`);
     }
-    const raw = fs.readFileSync(HOLDINGS_FILE, 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed.stocks)) return DEFAULT_HOLDINGS;
-    return parsed;
+    const json = await res.json();
+    const data = json.record;
+    if (!data || !Array.isArray(data.stocks)) return DEFAULT_HOLDINGS;
+    return data;
   } catch (e) {
     console.error('保有一覧表の読み込みに失敗しました:', e.message);
     return DEFAULT_HOLDINGS;
   }
 }
 
-function saveHoldings(data) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(HOLDINGS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+async function saveHoldings(data) {
+  const res = await fetch(`${JSONBIN_BASE}/${JSONBIN_BIN_ID}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Master-Key': JSONBIN_API_KEY
+    },
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`JSONBin 保存エラー: ${res.status} ${text}`);
+  }
 }
 
 // 証券コード(4文字。数字だけでなく "212A" のような形式もあります)の末尾に
@@ -416,12 +428,16 @@ async function fetchNewsFor(keyword) {
 // ============================================================
 
 // 保有一覧表(銘柄+オルカン)をそのまま返す
-app.get('/api/holdings', (req, res) => {
-  res.json(loadHoldings());
+app.get('/api/holdings', async (req, res) => {
+  try {
+    res.json(await loadHoldings());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // 銘柄を追加
-app.post('/api/holdings/stocks', (req, res) => {
+app.post('/api/holdings/stocks', async (req, res) => {
   const { code, name, shares, cost } = req.body || {};
 
   if (!code || !/^[0-9A-Za-z]{4}$/.test(code)) {
@@ -431,57 +447,73 @@ app.post('/api/holdings/stocks', (req, res) => {
     return res.status(400).json({ error: '銘柄名を入力してください' });
   }
 
-  const data = loadHoldings();
-  if (data.stocks.some((s) => s.code === code)) {
-    return res.status(400).json({ error: 'その証券コードはすでに追加されています' });
-  }
+  try {
+    const data = await loadHoldings();
+    if (data.stocks.some((s) => s.code === code)) {
+      return res.status(400).json({ error: 'その証券コードはすでに追加されています' });
+    }
 
-  data.stocks.push({
-    code,
-    name,
-    shares: shares || null,
-    cost: cost || null
-  });
-  saveHoldings(data);
-  res.json(data);
+    data.stocks.push({
+      code,
+      name,
+      shares: shares || null,
+      cost: cost || null
+    });
+    await saveHoldings(data);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // 銘柄の保有株数・取得単価を編集
-app.put('/api/holdings/stocks/:code', (req, res) => {
+app.put('/api/holdings/stocks/:code', async (req, res) => {
   const { code } = req.params;
   const { shares, cost } = req.body || {};
 
-  const data = loadHoldings();
-  const target = data.stocks.find((s) => s.code === code);
-  if (!target) {
-    return res.status(404).json({ error: '指定された銘柄が見つかりません' });
-  }
+  try {
+    const data = await loadHoldings();
+    const target = data.stocks.find((s) => s.code === code);
+    if (!target) {
+      return res.status(404).json({ error: '指定された銘柄が見つかりません' });
+    }
 
-  target.shares = shares || null;
-  target.cost = cost || null;
-  saveHoldings(data);
-  res.json(data);
+    target.shares = shares || null;
+    target.cost = cost || null;
+    await saveHoldings(data);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // 銘柄を削除
-app.delete('/api/holdings/stocks/:code', (req, res) => {
+app.delete('/api/holdings/stocks/:code', async (req, res) => {
   const { code } = req.params;
-  const data = loadHoldings();
-  data.stocks = data.stocks.filter((s) => s.code !== code);
-  saveHoldings(data);
-  res.json(data);
+  try {
+    const data = await loadHoldings();
+    data.stocks = data.stocks.filter((s) => s.code !== code);
+    await saveHoldings(data);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // オルカンの保有状況(積立元本・保有口数)を保存
-app.put('/api/holdings/orcan', (req, res) => {
+app.put('/api/holdings/orcan', async (req, res) => {
   const { principal, units } = req.body || {};
-  const data = loadHoldings();
-  data.orcan = {
-    principal: principal || null,
-    units: units || null
-  };
-  saveHoldings(data);
-  res.json(data);
+  try {
+    const data = await loadHoldings();
+    data.orcan = {
+      principal: principal || null,
+      units: units || null
+    };
+    await saveHoldings(data);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ============================================================
@@ -492,7 +524,7 @@ app.put('/api/holdings/orcan', (req, res) => {
 // + 保有株数・取得単価から計算した評価額・評価損益
 app.get('/api/stocks', async (req, res) => {
   try {
-    const holdings = loadHoldings();
+    const holdings = await loadHoldings();
     const results = await Promise.all(
       holdings.stocks.map(async (s) => {
         // どちらかが失敗しても、もう片方の結果は返せるようにそれぞれ個別にtry/catchします
@@ -548,7 +580,7 @@ app.get('/api/stocks', async (req, res) => {
 // オルカンの基準価額など + 積立元本・保有口数から計算した評価額・評価損益
 app.get('/api/orcan', async (req, res) => {
   try {
-    const holdings = loadHoldings();
+    const holdings = await loadHoldings();
     const data = await fetchOrcanData();
     const o = data.value;
 
@@ -579,7 +611,7 @@ app.get('/api/orcan', async (req, res) => {
 // テクニカル分析(RSI・移動平均線・出来高)※参考情報、売買の推奨ではありません
 app.get('/api/technicals', async (req, res) => {
   try {
-    const holdings = loadHoldings();
+    const holdings = await loadHoldings();
     const results = await Promise.all(
       holdings.stocks.map(async (s) => {
         let technical = null;
@@ -622,7 +654,7 @@ app.get('/api/market', async (req, res) => {
 // ニュース見出し一覧(保有銘柄名 + 世界経済 + 日本株、それぞれ数件ずつ)
 app.get('/api/news', async (req, res) => {
   try {
-    const holdings = loadHoldings();
+    const holdings = await loadHoldings();
     const keywords = [...holdings.stocks.map((s) => s.name), '日本株', '世界経済'];
     const results = {};
     for (const kw of keywords) {
