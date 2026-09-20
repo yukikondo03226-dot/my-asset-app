@@ -125,7 +125,7 @@ async function scrapeStockPrice(code) {
   const bodyText = $('body').text().replace(/\s+/g, ' ');
 
   const priceMatch = bodyText.match(/現在値\s*([0-9,]+\.?[0-9]*)/);
-  const changeMatch = bodyText.match(/前日比\s*([+\-−]?[0-9,]+\.?[0-9]*)\s*\(([+\-−]?[0-9.]+)%\)/);
+  const changeMatch = bodyText.match(/前日比\s*[▲△▼]?\s*([+\-−]?[0-9,]+\.?[0-9]*)\s*\(\s*[▲△▼]?\s*([+\-−]?[0-9.]+)\s*%\s*\)/);
   const perMatch = bodyText.match(/EPS\(PER\)\s*[0-9,.]+円\(([0-9.]+)倍\)/);
   const pbrMatch = bodyText.match(/BPS\(PBR\)\s*[0-9,.]+円\(([0-9.]+)倍\)/);
   const dividendMatch = bodyText.match(/予想配当利回り\s*([0-9.]+)%/);
@@ -165,19 +165,14 @@ async function fetchOrcanData() {
   }
 
   const json = await res.json();
-  // レスポンスの入れ子構造がやや複雑なため、値が見つかる場所を順番に探します
-  const value =
-    json?.detaets?.value?.[0] ||
-    json?.details?.value?.[0] ||
-    json?.result?.details?.value?.[0] ||
-    null;
+  // 正しい場所が判明したので、ここから読み取ります
+  const value = json?.datasets?.[0] || null;
 
   if (value) {
     return { value, raw: null };
   }
 
-  // 予想した場所に値が見つからなかった場合、原因を調べられるように
-  // レスポンス全体をそのまま返します(あとで正しい場所を見つけたら直します)
+  // 万が一また構造が変わった場合に備えて、レスポンス全体を返せるようにしておきます
   return { value: null, raw: json };
 }
 
@@ -280,5 +275,3 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`サーバーがポート${PORT}で起動しました`);
 });
-
-
