@@ -53,6 +53,26 @@ const STOCK_CODES = [
 // オルカン(eMAXIS Slim 全世界株式(オール・カントリー))の協会コード
 const ORCAN_FUND_CODE = '0331418A';
 
+// ------------------------------------------------------------
+// 画面側(public/index.html)から ?codes=7203:トヨタ自動車|6758:ソニーグループ
+// のような形式で送られてきた銘柄リストを読み取ります。
+// 指定がなければ、上のSTOCK_CODES(初期の3銘柄)を使います。
+// ------------------------------------------------------------
+function parseCodesParam(param) {
+  if (!param) return STOCK_CODES;
+  const parsed = param
+    .split('|')
+    .map((entry) => {
+      const [code, nameEncoded] = entry.split(':');
+      if (!code || !/^[0-9]{4}$/.test(code)) return null;
+      const name = nameEncoded ? decodeURIComponent(nameEncoded) : code;
+      // 証券コード(4桁)の末尾に0を付けるとJ-Quants用の5桁コードになります(通常株式の場合)
+      return { yahooCode: code, jquantsCode: `${code}0`, name };
+    })
+    .filter(Boolean);
+  return parsed.length > 0 ? parsed : STOCK_CODES;
+}
+
 // 日付を YYYYMMDD 形式の文字列にする小さな道具
 function toYyyymmdd(date) {
   return date.toISOString().slice(0, 10).replace(/-/g, '');
@@ -205,10 +225,12 @@ async function fetchNewsFor(keyword) {
 // ============================================================
 
 // 保有株一覧: 松井証券ページの「今日に近い」株価 + J-Quantsの「約3ヶ月前」の指標
+// ?codes=7203:トヨタ自動車|6758:ソニーグループ のように渡すと、その銘柄を使います
 app.get('/api/stocks', async (req, res) => {
   try {
+    const stockList = parseCodesParam(req.query.codes);
     const results = await Promise.all(
-      STOCK_CODES.map(async (s) => {
+      stockList.map(async (s) => {
         // どちらかが失敗しても、もう片方の結果は返せるようにそれぞれ個別にtry/catchします
         let current = null;
         let currentError = null;
@@ -255,9 +277,14 @@ app.get('/api/orcan', async (req, res) => {
 });
 
 // ニュース見出し一覧(保有銘柄名 + 世界経済 + 日本株、それぞれ数件ずつ)
+// ?names=トヨタ自動車|ソニーグループ のように渡すと、その銘柄名で検索します
 app.get('/api/news', async (req, res) => {
   try {
-    const keywords = [...STOCK_CODES.map((s) => s.name), '日本株', '世界経済'];
+    const namesParam = req.query.names;
+    const stockNames = namesParam
+      ? namesParam.split('|').map((n) => decodeURIComponent(n)).filter(Boolean)
+      : STOCK_CODES.map((s) => s.name);
+    const keywords = [...stockNames, '日本株', '世界経済'];
     const results = {};
     for (const kw of keywords) {
       results[kw] = await fetchNewsFor(kw);
