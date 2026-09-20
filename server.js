@@ -141,6 +141,122 @@ async function fetchLongTermIndicator(code) {
 }
 
 // ------------------------------------------------------------
+// J-Quants: テクニカル分析用に、指定した銘柄の値動きの履歴(約3ヶ月前まで)を取得
+// RSI・移動平均線の計算には多めの日数が必要なので、長めの期間を指定します。
+// ------------------------------------------------------------
+async function fetchPriceHistory(code) {
+  const jquantsCode = toJquantsCode(code);
+  const today = new Date();
+  const to = new Date(today);
+  to.setDate(to.getDate() - 84); // 12週間前(無料プランで取得できる一番新しい時期)
+  const from = new Date(to);
+  from.setDate(from.getDate() - 200); // 移動平均線(75日)の計算に十分な日数をさかのぼる
+
+  const fromStr = toYyyymmdd(from);
+  const toStr = toYyyymmdd(to);
+  const headers = { 'x-api-key': JQUANTS_API_KEY };
+
+  const res = await fetch(
+    `https://api.jquants.com/v2/equities/bars/daily?code=${jquantsCode}&from=${fromStr}&to=${toStr}`,
+    { headers }
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`J-Quants 株価履歴取得エラー(銘柄${code}): ${res.status} ${text}`);
+  }
+  const json = await res.json();
+  return (json.data || []).slice().sort((a, b) => a.Date.localeCompare(b.Date));
+}
+
+// RSI(相対力指数)を計算する(Wilderの方法、期間14日が標準)
+function calcRSI(closes, period = 14) {
+  if (closes.length < period + 1) return null;
+  let gains = 0;
+  let losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff >= 0) gains += diff; else losses -= diff;
+  }
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+  for (let i = period + 1; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    const gain = diff > 0 ? diff : 0;
+    const loss = diff < 0 ? -diff : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+  }
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+
+// 単純移動平均線(SMA)を計算する
+function calcSMA(closes, period) {
+  if (closes.length < period) return null;
+  const slice = closes.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / period;
+}
+
+// ゴールデンクロス・デッドクロスを検出する(25日線と75日線)
+function calcCrossSignal(closes) {
+  if (closes.length < 77) return null;
+  const ma25Today = calcSMA(closes, 25);
+  const ma75Today = calcSMA(closes, 75);
+  const closesYesterday = closes.slice(0, -1);
+  const ma25Yesterday = calcSMA(closesYesterday, 25);
+  const ma75Yesterday = calcSMA(closesYesterday, 75);
+  if (ma25Today == null || ma75Today == null || ma25Yesterday == null || ma75Yesterday == null) return null;
+  if (ma25Yesterday <= ma75Yesterday && ma25Today > ma75Today) return 'golden';
+  if (ma25Yesterday >= ma75Yesterday && ma25Today < ma75Today) return 'dead';
+  return null;
+}
+
+// 上のデータをまとめて、シグナル(タグ)とコメントを組み立てる
+function computeTechnicals(bars) {
+  if (!bars || bars.length < 20) return null;
+
+  const closes = bars.map((b) => b.Close).filter((v) => v != null);
+  const volumes = bars.map((b) => b.Volume).filter((v) => v != null);
+
+  const rsi = calcRSI(closes, 14);
+  const ma25 = calcSMA(closes, 25);
+  const ma75 = calcSMA(closes, 75);
+  const cross = calcCrossSignal(closes);
+
+  const latestVolume = volumes.length ? volumes[volumes.length - 1] : null;
+  const avgVolume = volumes.length ? volumes.reduce((a, b) => a + b, 0) / volumes.length : null;
+  const volumeRatioPct = latestVolume != null && avgVolume ? Math.round((latestVolume / avgVolume) * 100) : null;
+
+  let signal = '中立';
+  let comment = '目立ったシグナルは出ていません。';
+
+  if (cross === 'golden') {
+    signal = 'ゴールデンクロス';
+    comment = '短期(25日)の移動平均線が長期(75日)を上抜けました。短期的な上昇モメンタムのシグナルとされています。';
+  } else if (cross === 'dead') {
+    signal = 'デッドクロス';
+    comment = '短期(25日)の移動平均線が長期(75日)を下抜けました。短期的な下降モメンタムのシグナルとされています。';
+  } else if (rsi != null && rsi >= 70) {
+    signal = 'RSI高水準';
+    comment = 'RSIが70以上で、一般的に「買われすぎ」とされる水準にあります。';
+  } else if (rsi != null && rsi <= 30) {
+    signal = 'RSI低水準';
+    comment = 'RSIが30以下で、一般的に「売られすぎ」とされる水準にあります。';
+  }
+
+  return {
+    asOfDate: bars[bars.length - 1].Date,
+    rsi: rsi != null ? Math.round(rsi * 10) / 10 : null,
+    ma25: ma25 != null ? Math.round(ma25 * 100) / 100 : null,
+    ma75: ma75 != null ? Math.round(ma75 * 100) / 100 : null,
+    volumeRatioPct,
+    signal,
+    comment
+  };
+}
+
+// ------------------------------------------------------------
 // 松井証券の株価ページ: 指定した銘柄コードの「今日に近い」株価・前日比・
 // PER・配当利回りをページから読み取る(非公式スクレイピング)
 // ログイン不要で公開されているページです。
@@ -454,6 +570,33 @@ app.get('/api/orcan', async (req, res) => {
       evaluation,
       debugRaw: o ? undefined : data.raw
     });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// テクニカル分析(RSI・移動平均線・出来高)※参考情報、売買の推奨ではありません
+app.get('/api/technicals', async (req, res) => {
+  try {
+    const holdings = loadHoldings();
+    const results = await Promise.all(
+      holdings.stocks.map(async (s) => {
+        let technical = null;
+        let error = null;
+        try {
+          const bars = await fetchPriceHistory(s.code);
+          technical = computeTechnicals(bars);
+          if (!technical) {
+            error = '計算に十分な期間のデータが取得できませんでした';
+          }
+        } catch (err) {
+          error = err.message;
+        }
+        return { name: s.name, code: s.code, technical, error };
+      })
+    );
+    res.json({ technicals: results });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
