@@ -2,8 +2,8 @@
 // マイ資産アプリ バックエンドサーバー
 // ------------------------------------------------------------
 // このファイルが行うこと:
-//   1. Yahoo!ファイナンスのページから、保有している日本株の
-//      「今日に近い」株価・前日比・PER/PBR等を取得する
+//   1. 松井証券の公開株価ページから、保有している日本株の
+//      「今日に近い」株価・前日比・PER等を取得する
 //      (※非公式な方法です。下の「注意」を必ずお読みください)
 //   2. J-Quants から、同じ銘柄のPER/PBRの「約3ヶ月前時点」のデータを取得する
 //      (長期的な指標の推移を見るための参考値として使います)
@@ -13,9 +13,9 @@
 //      (AIによる要約・推測は行わず、見出しの一覧のみを返します)
 //
 // ★重要な注意(1番について)
-// Yahoo!ファイナンスは公式にAPIを提供していないため、ページのHTMLを
+// 松井証券のページは公式にAPIを提供していないため、ページのHTMLを
 // 直接読み取る「非公式スクレイピング」という方法を使っています。
-//   - Yahoo!ファイナンスの利用規約上、正式に許可された使い方ではありません
+//   - 正式に許可された使い方ではありません
 //   - サイトのデザインが変わると、このプログラムが突然動かなくなる可能性があります
 //   - 個人が少ない頻度(1日に数回程度)でアクセスする分には実務上大きな問題に
 //     なるケースは少ないとされますが、リスクを理解した上でご利用ください
@@ -100,11 +100,12 @@ async function fetchLongTermIndicator(code) {
 }
 
 // ------------------------------------------------------------
-// Yahoo!ファイナンス: 指定した銘柄コードの「今日に近い」株価・前日比・
-// PER/PBR・配当利回りをページから読み取る(非公式スクレイピング)
+// 松井証券の株価ページ: 指定した銘柄コードの「今日に近い」株価・前日比・
+// PER・配当利回りをページから読み取る(非公式スクレイピング)
+// ログイン不要で公開されているページです。
 // ------------------------------------------------------------
-async function scrapeYahooPrice(yahooCode) {
-  const url = `https://finance.yahoo.co.jp/quote/${yahooCode}.T`;
+async function scrapeStockPrice(code) {
+  const url = `https://finance.matsui.co.jp/stock/${code}/index`;
 
   const res = await fetch(url, {
     headers: {
@@ -115,7 +116,7 @@ async function scrapeYahooPrice(yahooCode) {
   });
 
   if (!res.ok) {
-    throw new Error(`Yahoo!ファイナンスの取得に失敗しました(銘柄${yahooCode}): ${res.status}`);
+    throw new Error(`株価ページの取得に失敗しました(銘柄${code}): ${res.status}`);
   }
 
   const html = await res.text();
@@ -125,15 +126,15 @@ async function scrapeYahooPrice(yahooCode) {
 
   const priceMatch = bodyText.match(/現在値\s*([0-9,]+\.?[0-9]*)/);
   const changeMatch = bodyText.match(/前日比\s*([+\-−]?[0-9,]+\.?[0-9]*)\s*\(([+\-−]?[0-9.]+)%\)/);
-  const perMatch = bodyText.match(/PER\(予想\)\s*[()連\s]*([0-9.]+)\s*倍/);
-  const pbrMatch = bodyText.match(/PBR\(実績\)\s*[()連\s]*([0-9.]+)\s*倍/);
-  const dividendMatch = bodyText.match(/配当利回り\(予想\)\s*([0-9.]+)%/);
+  const perMatch = bodyText.match(/EPS\(PER\)\s*[0-9,.]+円\(([0-9.]+)倍\)/);
+  const pbrMatch = bodyText.match(/BPS\(PBR\)\s*[0-9,.]+円\(([0-9.]+)倍\)/);
+  const dividendMatch = bodyText.match(/予想配当利回り\s*([0-9.]+)%/);
 
   if (!priceMatch) {
     // ページの構成が変わって読み取れなかった場合。ここでエラーを出すことで、
     // 「サイレントに古いデータのまま」になることを防ぎます。
     throw new Error(
-      `Yahoo!ファイナンスのページ構成が変わった可能性があります(銘柄${yahooCode})。この銘柄のURL(${url})を開いて、実際の表示と見比べてみてください。`
+      `株価ページの構成が変わった可能性があります(銘柄${code})。このURL(${url})を開いて、実際の表示と見比べてみてください。`
     );
   }
 
@@ -171,7 +172,13 @@ async function fetchOrcanData() {
     json?.result?.details?.value?.[0] ||
     null;
 
-  return value;
+  if (value) {
+    return { value, raw: null };
+  }
+
+  // 予想した場所に値が見つからなかった場合、原因を調べられるように
+  // レスポンス全体をそのまま返します(あとで正しい場所を見つけたら直します)
+  return { value: null, raw: json };
 }
 
 // ------------------------------------------------------------
@@ -200,7 +207,7 @@ async function fetchNewsFor(keyword) {
 // APIエンドポイント(スマホアプリ側からはこのURLを呼び出します)
 // ============================================================
 
-// 保有株一覧: Yahoo!ファイナンスの「今日に近い」株価 + J-Quantsの「約3ヶ月前」の指標
+// 保有株一覧: 松井証券ページの「今日に近い」株価 + J-Quantsの「約3ヶ月前」の指標
 app.get('/api/stocks', async (req, res) => {
   try {
     const results = await Promise.all(
@@ -209,7 +216,7 @@ app.get('/api/stocks', async (req, res) => {
         let current = null;
         let currentError = null;
         try {
-          current = await scrapeYahooPrice(s.yahooCode);
+          current = await scrapeStockPrice(s.yahooCode);
         } catch (err) {
           currentError = err.message;
         }
@@ -225,7 +232,7 @@ app.get('/api/stocks', async (req, res) => {
         return {
           name: s.name,
           code: s.yahooCode,
-          current, // 今日に近い株価・PER/PBR(Yahoo!ファイナンス、非公式)
+          current, // 今日に近い株価・PER/PBR(松井証券の公開ページ、非公式)
           currentError,
           longTermIndicator, // 約3ヶ月前時点のPER/PBR(J-Quants、公式・無料)
           longTermError
@@ -243,7 +250,7 @@ app.get('/api/stocks', async (req, res) => {
 app.get('/api/orcan', async (req, res) => {
   try {
     const data = await fetchOrcanData();
-    res.json({ orcan: data });
+    res.json({ orcan: data.value, debugRaw: data.value ? undefined : data.raw });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -273,3 +280,5 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   console.log(`サーバーがポート${PORT}で起動しました`);
 });
+
+
