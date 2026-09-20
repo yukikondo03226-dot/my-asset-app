@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="マイ資産">
+<meta name="theme-color" content="#F4F1EA">
+<title>マイ資産</title>
+<style>
+  :root { box-sizing: border-box; }
+  * { box-sizing: inherit; }
+  body {
+    margin: 0;
+    font-family: Verdana, Geneva, sans-serif;
+    background: #F4F1EA;
+    color: #1C1B19;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  header {
+    padding: calc(20px + env(safe-area-inset-top, 0px)) 20px 12px;
+  }
+  h1 { font-size: 19px; margin: 0; }
+  .updated { font-size: 11px; color: #8A8478; margin-top: 2px; }
+
+  .tabs {
+    margin: 0 20px 16px;
+    display: flex;
+    background: #E8E3D8;
+    border-radius: 999px;
+    padding: 4px;
+  }
+  .tabs button {
+    flex: 1;
+    border: none;
+    border-radius: 999px;
+    padding: 9px 0;
+    font-size: 12px;
+    font-weight: bold;
+    background: transparent;
+    color: #8A8478;
+    font-family: inherit;
+  }
+  .tabs button.active {
+    background: #FFFFFF;
+    color: #1C1B19;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+  }
+
+  main { padding: 0 20px 40px; max-width: 480px; margin: 0 auto; }
+  .section-title {
+    font-size: 12px;
+    font-weight: bold;
+    color: #6B6558;
+    margin: 24px 0 10px;
+  }
+  .section-note {
+    font-size: 10px;
+    color: #A39D8E;
+    margin: -6px 0 10px;
+  }
+  .card {
+    background: #FFFFFF;
+    border: 1px solid #E8E3D8;
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+  }
+  .row { display: flex; justify-content: space-between; align-items: flex-start; }
+  .name { font-size: 13px; font-weight: bold; }
+  .code { font-size: 10px; color: #8A8478; }
+  .price { font-size: 15px; font-weight: bold; text-align: right; }
+  .change { font-size: 11px; font-weight: bold; text-align: right; }
+  .change.up { color: #C74B3C; }
+  .change.down { color: #2F6FB0; }
+  .divider { height: 1px; background: #EFEAE0; margin: 10px 0; }
+  .indicators { display: flex; gap: 16px; flex-wrap: wrap; }
+  .indicator-label { font-size: 9px; color: #8A8478; }
+  .indicator-value { font-size: 11px; font-weight: bold; }
+  .asof { font-size: 10px; color: #A39D8E; margin-top: 8px; }
+
+  .news-item { margin-bottom: 12px; }
+  .news-title { font-size: 12px; font-weight: bold; line-height: 1.5; }
+  .news-title a { color: #1C1B19; text-decoration: none; }
+  .news-meta { font-size: 10px; color: #8A8478; margin-top: 2px; }
+
+  .error-box {
+    background: #FBEFEC;
+    border: 1px solid #E8C9C2;
+    color: #9B4A3A;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 11px;
+    margin-bottom: 10px;
+  }
+  .loading { font-size: 12px; color: #8A8478; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>マイ資産</h1>
+  <div class="updated" id="updatedAt">読み込み中...</div>
+</header>
+
+<div class="tabs">
+  <button id="tab-stocks" class="active" onclick="switchTab('stocks')">個別株</button>
+  <button id="tab-orcan" onclick="switchTab('orcan')">積立NISA(オルカン)</button>
+</div>
+
+<main>
+  <div id="view-stocks">
+    <div class="section-title">保有銘柄</div>
+    <div id="stocksList" class="loading">読み込み中...(サーバーが休止していた場合、起動に30秒ほどかかることがあります)</div>
+
+    <div class="section-title">関連ニュース見出し</div>
+    <div class="section-note">※AIによる推測は行っていません。見出しの一覧です。</div>
+    <div id="stocksNews" class="loading">読み込み中...</div>
+  </div>
+
+  <div id="view-orcan" style="display:none;">
+    <div class="section-title">eMAXIS Slim 全世界株式(オール・カントリー)</div>
+    <div id="orcanCard" class="loading">読み込み中...</div>
+
+    <div class="section-title">世界経済ニュース見出し</div>
+    <div class="section-note">※AIによる推測は行っていません。見出しの一覧です。</div>
+    <div id="orcanNews" class="loading">読み込み中...</div>
+  </div>
+</main>
+
+<script>
+function switchTab(tab) {
+  document.getElementById('tab-stocks').classList.toggle('active', tab === 'stocks');
+  document.getElementById('tab-orcan').classList.toggle('active', tab === 'orcan');
+  document.getElementById('view-stocks').style.display = tab === 'stocks' ? 'block' : 'none';
+  document.getElementById('view-orcan').style.display = tab === 'orcan' ? 'block' : 'none';
+}
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return '--';
+  return Number(n).toLocaleString('ja-JP');
+}
+
+function fmtChange(change, changePct) {
+  if (change === null || change === undefined) return '';
+  const sign = change > 0 ? '+' : '';
+  const pctText = (changePct !== null && changePct !== undefined) ? ` (${changePct > 0 ? '+' : ''}${changePct.toFixed(2)}%)` : '';
+  return `${sign}${fmtNum(change)}${pctText}`;
+}
+
+async function loadStocks() {
+  const el = document.getElementById('stocksList');
+  try {
+    const res = await fetch('/api/stocks');
+    const data = await res.json();
+    if (!data.stocks) throw new Error('データの形式が想定と違います');
+
+    el.innerHTML = '';
+    data.stocks.forEach((s) => {
+      const c = s.current || {};
+      const lt = s.longTermIndicator || {};
+      const changeClass = c.change > 0 ? 'up' : (c.change < 0 ? 'down' : '');
+
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      let errorHtml = '';
+      if (s.currentError) {
+        errorHtml += `<div class="error-box">今日に近い株価の取得に失敗しました: ${s.currentError}</div>`;
+      }
+
+      card.innerHTML = `
+        ${errorHtml}
+        <div class="row">
+          <div>
+            <div class="name">${s.name}</div>
+            <div class="code">${s.code}</div>
+          </div>
+          <div>
+            <div class="price">${c.close != null ? '¥' + fmtNum(c.close) : '--'}</div>
+            <div class="change ${changeClass}">${fmtChange(c.change, c.changePct)}</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+        <div class="indicators">
+          <div><div class="indicator-label">PER(今日に近い)</div><div class="indicator-value">${c.per != null ? c.per + '倍' : '--'}</div></div>
+          <div><div class="indicator-label">PBR(今日に近い)</div><div class="indicator-value">${c.pbr != null ? c.pbr + '倍' : '--'}</div></div>
+          <div><div class="indicator-label">PER(${lt.asOfDate || '約3ヶ月前'})</div><div class="indicator-value">${lt.per != null ? lt.per + '倍' : '--'}</div></div>
+          <div><div class="indicator-label">PBR(${lt.asOfDate || '約3ヶ月前'})</div><div class="indicator-value">${lt.pbr != null ? lt.pbr + '倍' : '--'}</div></div>
+        </div>
+      `;
+      el.appendChild(card);
+    });
+  } catch (err) {
+    el.innerHTML = `<div class="error-box">株価の取得に失敗しました: ${err.message}</div>`;
+  }
+}
+
+async function loadNews(targetElId, keywords) {
+  const el = document.getElementById(targetElId);
+  try {
+    const res = await fetch('/api/news');
+    const data = await res.json();
+    if (!data.news) throw new Error('データの形式が想定と違います');
+
+    el.innerHTML = '';
+    keywords.forEach((kw) => {
+      const items = data.news[kw] || [];
+      items.slice(0, 3).forEach((item) => {
+        const div = document.createElement('div');
+        div.className = 'news-item';
+        const date = item.publishedAt ? new Date(item.publishedAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+        div.innerHTML = `
+          <div class="news-title"><a href="${item.url}" target="_blank" rel="noopener">${item.title}</a></div>
+          <div class="news-meta">${item.source || ''}${date ? ' ・ ' + date : ''}</div>
+        `;
+        el.appendChild(div);
+      });
+    });
+    if (!el.innerHTML) {
+      el.innerHTML = '<div class="loading">関連ニュースが見つかりませんでした</div>';
+    }
+  } catch (err) {
+    el.innerHTML = `<div class="error-box">ニュースの取得に失敗しました: ${err.message}</div>`;
+  }
+}
+
+async function loadOrcan() {
+  const el = document.getElementById('orcanCard');
+  try {
+    const res = await fetch('/api/orcan');
+    const data = await res.json();
+    const o = data.orcan;
+    if (!o) throw new Error('データが見つかりませんでした');
+
+    const changeClass = Number(o.cmp_prev_day) > 0 ? 'up' : (Number(o.cmp_prev_day) < 0 ? 'down' : '');
+
+    el.innerHTML = `
+      <div class="card">
+        <div class="row">
+          <div class="price">¥${fmtNum(o.nav)}</div>
+          <div class="change ${changeClass}">${o.cmp_prev_day > 0 ? '+' : ''}${fmtNum(o.cmp_prev_day)} (${o.percentage_change > 0 ? '+' : ''}${o.percentage_change}%)</div>
+        </div>
+        <div class="asof">基準日: ${o.base_date}</div>
+        <div class="divider"></div>
+        <div class="indicators">
+          <div><div class="indicator-label">純資産総額</div><div class="indicator-value">${(o.netassets / 100000000).toFixed(0)}億円</div></div>
+          <div><div class="indicator-label">1ヶ月騰落率</div><div class="indicator-value">${o.percentage_change_1m}%</div></div>
+          <div><div class="indicator-label">1年騰落率</div><div class="indicator-value">${o.percentage_change_1y}%</div></div>
+          <div><div class="indicator-label">設定来騰落率</div><div class="indicator-value">${o.percentage_change_full}%</div></div>
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    el.innerHTML = `<div class="error-box">オルカンデータの取得に失敗しました: ${err.message}</div>`;
+  }
+}
+
+const STOCK_NAMES = ['トヨタ自動車', 'ソニーグループ', '三菱UFJフィナンシャル・グループ'];
+
+document.getElementById('updatedAt').textContent = new Date().toLocaleString('ja-JP') + ' 時点で表示';
+loadStocks();
+loadNews('stocksNews', STOCK_NAMES);
+loadOrcan();
+loadNews('orcanNews', ['世界経済']);
+</script>
+</body>
+</html>

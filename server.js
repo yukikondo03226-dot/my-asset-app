@@ -29,9 +29,11 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const cheerio = require('cheerio');
+const path = require('path');
 
 const app = express();
 app.use(cors());
+app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
 const JQUANTS_API_KEY = process.env.JQUANTS_API_KEY;
@@ -267,8 +269,8 @@ app.get('/api/news', async (req, res) => {
   }
 });
 
-// 動作確認用トップページ
-app.get('/', (req, res) => {
+// 動作確認用(トップページは public/index.html が表示されます)
+app.get('/status', (req, res) => {
   res.send('マイ資産アプリ バックエンドAPI 稼働中です。/api/stocks, /api/orcan, /api/news をお試しください。');
 });
 
