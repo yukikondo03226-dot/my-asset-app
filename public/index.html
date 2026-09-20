@@ -194,42 +194,57 @@
 
 <script>
 // ------------------------------------------------------------
-// 保有銘柄のリストは、このスマホ・ブラウザの中(localStorage)に保存します。
-// 他の端末とは共有されません。
+// 保有銘柄・オルカンの保有状況は、すべてサーバー側(data/holdings.json)に
+// 保存されます。Safariで開いても、ホーム画面のアイコンから開いても、
+// 同じ内容が表示されます。
 // ------------------------------------------------------------
-const DEFAULT_STOCKS = [
-  { code: '7203', name: 'トヨタ自動車', shares: null, cost: null },
-  { code: '6758', name: 'ソニーグループ', shares: null, cost: null },
-  { code: '8306', name: '三菱UFJフィナンシャル・グループ', shares: null, cost: null }
-];
 
-function getMyStocks() {
-  try {
-    const raw = localStorage.getItem('myStocks');
-    if (!raw) return DEFAULT_STOCKS;
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed : DEFAULT_STOCKS;
-  } catch (e) {
-    return DEFAULT_STOCKS;
-  }
+function switchTab(tab) {
+  document.getElementById('tab-stocks').classList.toggle('active', tab === 'stocks');
+  document.getElementById('tab-orcan').classList.toggle('active', tab === 'orcan');
+  document.getElementById('view-stocks').style.display = tab === 'stocks' ? 'block' : 'none';
+  document.getElementById('view-orcan').style.display = tab === 'orcan' ? 'block' : 'none';
 }
 
-function saveMyStocks(stocks) {
-  localStorage.setItem('myStocks', JSON.stringify(stocks));
+function fmtNum(n) {
+  if (n === null || n === undefined || isNaN(n)) return '--';
+  return Number(n).toLocaleString('ja-JP');
 }
 
-function addStock() {
+function fmtChange(change, changePct) {
+  if (change === null || change === undefined) return '';
+  const sign = change > 0 ? '+' : '';
+  const pctText = (changePct !== null && changePct !== undefined) ? ` (${changePct > 0 ? '+' : ''}${changePct.toFixed(2)}%)` : '';
+  return `${sign}${fmtNum(change)}${pctText}`;
+}
+
+function renderNewsItem(item) {
+  const div = document.createElement('div');
+  div.className = 'news-item';
+  const date = item.publishedAt ? new Date(item.publishedAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+  div.innerHTML = `
+    <div class="news-title"><a href="${item.url}" target="_blank" rel="noopener">${item.title}</a></div>
+    <div class="news-meta">${item.source || ''}${date ? ' ・ ' + date : ''}</div>
+  `;
+  return div;
+}
+
+// ============================================================
+// 銘柄の追加・編集・削除(サーバーに保存)
+// ============================================================
+
+async function addStock() {
   const codeEl = document.getElementById('addCode');
   const nameEl = document.getElementById('addName');
   const sharesEl = document.getElementById('addShares');
   const costEl = document.getElementById('addCost');
   const errEl = document.getElementById('addError');
+  errEl.style.display = 'none';
+
   const code = codeEl.value.trim();
   const name = nameEl.value.trim();
   const shares = sharesEl.value.trim() ? Number(sharesEl.value.trim()) : null;
   const cost = costEl.value.trim() ? Number(costEl.value.trim()) : null;
-
-  errEl.style.display = 'none';
 
   if (!/^[0-9A-Za-z]{4}$/.test(code)) {
     errEl.textContent = '証券コードは4文字(数字・アルファベット)で入力してください(例: 9984, 212A)';
@@ -252,107 +267,115 @@ function addStock() {
     return;
   }
 
-  const stocks = getMyStocks();
-  if (stocks.some((s) => s.code === code)) {
-    errEl.textContent = 'その証券コードはすでに追加されています';
+  try {
+    const res = await fetch('/api/holdings/stocks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, name, shares, cost })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      errEl.textContent = data.error || '追加に失敗しました';
+      errEl.style.display = 'block';
+      return;
+    }
+    codeEl.value = '';
+    nameEl.value = '';
+    sharesEl.value = '';
+    costEl.value = '';
+    refreshAll();
+  } catch (err) {
+    errEl.textContent = '通信エラー: ' + err.message;
     errEl.style.display = 'block';
-    return;
   }
-
-  stocks.push({ code, name, shares, cost });
-  saveMyStocks(stocks);
-  codeEl.value = '';
-  nameEl.value = '';
-  sharesEl.value = '';
-  costEl.value = '';
-  refreshAll();
 }
 
-function editStock(code) {
-  const stocks = getMyStocks();
-  const target = stocks.find((s) => s.code === code);
-  if (!target) return;
-
-  const sharesInput = window.prompt('保有株数を入力してください(空欄でクリア)', target.shares ?? '');
+async function editStock(code, currentShares, currentCost) {
+  const sharesInput = window.prompt('保有株数を入力してください(空欄でクリア)', currentShares ?? '');
   if (sharesInput === null) return; // キャンセル
-  const costInput = window.prompt('取得単価(円)を入力してください(空欄でクリア)', target.cost ?? '');
+  const costInput = window.prompt('取得単価(円)を入力してください(空欄でクリア)', currentCost ?? '');
   if (costInput === null) return; // キャンセル
 
-  target.shares = sharesInput.trim() ? Number(sharesInput.trim()) : null;
-  target.cost = costInput.trim() ? Number(costInput.trim()) : null;
+  const shares = sharesInput.trim() ? Number(sharesInput.trim()) : null;
+  const cost = costInput.trim() ? Number(costInput.trim()) : null;
 
-  if ((target.shares !== null && (isNaN(target.shares) || target.shares <= 0)) ||
-      (target.cost !== null && (isNaN(target.cost) || target.cost <= 0))) {
+  if ((shares !== null && (isNaN(shares) || shares <= 0)) ||
+      (cost !== null && (isNaN(cost) || cost <= 0))) {
     alert('数字が正しくないため、変更を反映できませんでした');
     return;
   }
 
-  saveMyStocks(stocks);
-  refreshAll();
+  try {
+    const res = await fetch('/api/holdings/stocks/' + encodeURIComponent(code), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shares, cost })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      alert('更新に失敗しました: ' + (data.error || res.status));
+      return;
+    }
+    refreshAll();
+  } catch (err) {
+    alert('通信エラー: ' + err.message);
+  }
 }
 
-function removeStock(code) {
-  const stocks = getMyStocks().filter((s) => s.code !== code);
-  saveMyStocks(stocks);
-  refreshAll();
+async function removeStock(code) {
+  try {
+    const res = await fetch('/api/holdings/stocks/' + encodeURIComponent(code), { method: 'DELETE' });
+    if (!res.ok) {
+      const data = await res.json();
+      alert('削除に失敗しました: ' + (data.error || res.status));
+      return;
+    }
+    refreshAll();
+  } catch (err) {
+    alert('通信エラー: ' + err.message);
+  }
 }
 
-function switchTab(tab) {
-  document.getElementById('tab-stocks').classList.toggle('active', tab === 'stocks');
-  document.getElementById('tab-orcan').classList.toggle('active', tab === 'orcan');
-  document.getElementById('view-stocks').style.display = tab === 'stocks' ? 'block' : 'none';
-  document.getElementById('view-orcan').style.display = tab === 'orcan' ? 'block' : 'none';
-}
+// ============================================================
+// 個別株の表示
+// ============================================================
 
-function fmtNum(n) {
-  if (n === null || n === undefined) return '--';
-  return Number(n).toLocaleString('ja-JP');
-}
-
-function fmtChange(change, changePct) {
-  if (change === null || change === undefined) return '';
-  const sign = change > 0 ? '+' : '';
-  const pctText = (changePct !== null && changePct !== undefined) ? ` (${changePct > 0 ? '+' : ''}${changePct.toFixed(2)}%)` : '';
-  return `${sign}${fmtNum(change)}${pctText}`;
-}
-
-function buildCodesParam(stocks) {
-  return stocks.map((s) => `${s.code}:${encodeURIComponent(s.name)}`).join('|');
-}
+let lastStockNames = [];
 
 async function loadStocks() {
   const el = document.getElementById('stocksList');
-  const stocks = getMyStocks();
   try {
-    const res = await fetch('/api/stocks?codes=' + encodeURIComponent(buildCodesParam(stocks)));
+    const res = await fetch('/api/stocks');
     const data = await res.json();
     if (!data.stocks) throw new Error('データの形式が想定と違います');
 
+    lastStockNames = data.stocks.map((s) => s.name);
     el.innerHTML = '';
+
+    if (data.stocks.length === 0) {
+      el.innerHTML = '<div class="loading">保有銘柄がまだ登録されていません。下のフォームから追加してください。</div>';
+      return;
+    }
+
     data.stocks.forEach((s) => {
       const c = s.current || {};
       const lt = s.longTermIndicator || {};
       const changeClass = c.change > 0 ? 'up' : (c.change < 0 ? 'down' : '');
 
-      // localStorageに保存してある保有株数・取得単価をこの銘柄に合わせて探す
-      const holding = stocks.find((h) => h.code === s.code) || {};
       let plHtml = '';
-      if (holding.shares && holding.cost && c.close != null) {
-        const evalValue = holding.shares * c.close;
-        const costValue = holding.shares * holding.cost;
-        const pl = evalValue - costValue;
-        const plPct = (pl / costValue) * 100;
-        const plClass = pl > 0 ? 'up' : (pl < 0 ? 'down' : '');
+      if (s.evaluation) {
+        const ev = s.evaluation;
+        const plClass = ev.pl > 0 ? 'up' : (ev.pl < 0 ? 'down' : '');
         plHtml = `
           <div class="divider"></div>
           <div class="row">
             <div>
-              <div class="indicator-label">評価額(${holding.shares}株)</div>
-              <div class="indicator-value">¥${fmtNum(Math.round(evalValue))}</div>
+              <div class="indicator-label">評価額(${s.shares}株)</div>
+              <div class="indicator-value">¥${fmtNum(Math.round(ev.evalValue))}</div>
             </div>
             <div style="text-align:right;">
               <div class="indicator-label">評価損益</div>
-              <div class="change ${plClass}">${pl > 0 ? '+' : ''}¥${fmtNum(Math.round(pl))} (${plPct > 0 ? '+' : ''}${plPct.toFixed(1)}%)</div>
+              <div class="change ${plClass}">${ev.pl > 0 ? '+' : ''}¥${fmtNum(Math.round(ev.pl))} (${ev.plPct > 0 ? '+' : ''}${ev.plPct.toFixed(1)}%)</div>
             </div>
           </div>
         `;
@@ -387,8 +410,8 @@ async function loadStocks() {
         </div>
         ${plHtml}
         <div class="row" style="margin-top:8px;">
-          <button class="remove-btn" onclick="editStock('${s.code}')">株数・取得単価を編集</button>
-          <button class="remove-btn" onclick="removeStock('${s.code}')">この銘柄を削除</button>
+          <button class="remove-btn" onclick='editStock(${JSON.stringify(s.code)}, ${JSON.stringify(s.shares)}, ${JSON.stringify(s.cost)})'>株数・取得単価を編集</button>
+          <button class="remove-btn" onclick='removeStock(${JSON.stringify(s.code)})'>この銘柄を削除</button>
         </div>
       `;
       el.appendChild(card);
@@ -400,19 +423,15 @@ async function loadStocks() {
 
 async function loadStocksNews() {
   const el = document.getElementById('stocksNews');
-  const stocks = getMyStocks();
-  const namesParam = stocks.map((s) => encodeURIComponent(s.name)).join('|');
   try {
-    const res = await fetch('/api/news?names=' + namesParam);
+    const res = await fetch('/api/news');
     const data = await res.json();
     if (!data.news) throw new Error('データの形式が想定と違います');
 
     el.innerHTML = '';
-    stocks.forEach((s) => {
-      const items = data.news[s.name] || [];
-      items.slice(0, 3).forEach((item) => {
-        el.appendChild(renderNewsItem(item));
-      });
+    lastStockNames.forEach((name) => {
+      const items = data.news[name] || [];
+      items.slice(0, 3).forEach((item) => el.appendChild(renderNewsItem(item)));
     });
     if (!el.innerHTML) {
       el.innerHTML = '<div class="loading">関連ニュースが見つかりませんでした</div>';
@@ -420,17 +439,6 @@ async function loadStocksNews() {
   } catch (err) {
     el.innerHTML = `<div class="error-box">ニュースの取得に失敗しました: ${err.message}</div>`;
   }
-}
-
-function renderNewsItem(item) {
-  const div = document.createElement('div');
-  div.className = 'news-item';
-  const date = item.publishedAt ? new Date(item.publishedAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-  div.innerHTML = `
-    <div class="news-title"><a href="${item.url}" target="_blank" rel="noopener">${item.title}</a></div>
-    <div class="news-meta">${item.source || ''}${date ? ' ・ ' + date : ''}</div>
-  `;
-  return div;
 }
 
 async function loadOrcanNews() {
@@ -451,24 +459,19 @@ async function loadOrcanNews() {
   }
 }
 
-function getOrcanHolding() {
-  try {
-    const raw = localStorage.getItem('orcanHolding');
-    if (!raw) return { principal: null, units: null };
-    return JSON.parse(raw);
-  } catch (e) {
-    return { principal: null, units: null };
-  }
-}
+// ============================================================
+// オルカンの表示・保有状況の保存
+// ============================================================
 
-function saveOrcanHolding() {
+async function saveOrcanHolding() {
   const principalEl = document.getElementById('orcanPrincipal');
   const unitsEl = document.getElementById('orcanUnits');
   const errEl = document.getElementById('orcanError');
+  errEl.style.display = 'none';
+
   const principal = principalEl.value.trim() ? Number(principalEl.value.trim()) : null;
   const units = unitsEl.value.trim() ? Number(unitsEl.value.trim()) : null;
 
-  errEl.style.display = 'none';
   if (principalEl.value.trim() && (isNaN(principal) || principal <= 0)) {
     errEl.textContent = '積立元本は正しい数字で入力してください';
     errEl.style.display = 'block';
@@ -480,45 +483,56 @@ function saveOrcanHolding() {
     return;
   }
 
-  localStorage.setItem('orcanHolding', JSON.stringify({ principal, units }));
-  loadOrcan();
+  try {
+    const res = await fetch('/api/holdings/orcan', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ principal, units })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      errEl.textContent = data.error || '保存に失敗しました';
+      errEl.style.display = 'block';
+      return;
+    }
+    loadOrcan();
+  } catch (err) {
+    errEl.textContent = '通信エラー: ' + err.message;
+    errEl.style.display = 'block';
+  }
 }
 
 async function loadOrcan() {
   const el = document.getElementById('orcanCard');
-  const holding = getOrcanHolding();
-
-  // 入力欄に、前回保存した値を表示しておく
-  const principalEl = document.getElementById('orcanPrincipal');
-  const unitsEl = document.getElementById('orcanUnits');
-  if (principalEl && !principalEl.matches(':focus')) principalEl.value = holding.principal ?? '';
-  if (unitsEl && !unitsEl.matches(':focus')) unitsEl.value = holding.units ?? '';
-
   try {
     const res = await fetch('/api/orcan');
     const data = await res.json();
     const o = data.orcan;
     if (!o) throw new Error('データが見つかりませんでした');
 
+    // 入力欄に、サーバーに保存されている値を表示しておく(入力中でなければ)
+    const principalEl = document.getElementById('orcanPrincipal');
+    const unitsEl = document.getElementById('orcanUnits');
+    const holding = data.holding || {};
+    if (principalEl && !principalEl.matches(':focus')) principalEl.value = holding.principal ?? '';
+    if (unitsEl && !unitsEl.matches(':focus')) unitsEl.value = holding.units ?? '';
+
     const changeClass = Number(o.cmp_prev_day) > 0 ? 'up' : (Number(o.cmp_prev_day) < 0 ? 'down' : '');
 
     let plHtml = '';
-    if (holding.principal && holding.units) {
-      // 基準価額は「1万口あたり」の金額なので、口数を1万で割ってから掛けます
-      const evalValue = (holding.units / 10000) * o.nav;
-      const pl = evalValue - holding.principal;
-      const plPct = (pl / holding.principal) * 100;
-      const plClass = pl > 0 ? 'up' : (pl < 0 ? 'down' : '');
+    if (data.evaluation) {
+      const ev = data.evaluation;
+      const plClass = ev.pl > 0 ? 'up' : (ev.pl < 0 ? 'down' : '');
       plHtml = `
         <div class="divider"></div>
         <div class="row">
           <div>
             <div class="indicator-label">評価額(${fmtNum(holding.units)}口)</div>
-            <div class="indicator-value">¥${fmtNum(Math.round(evalValue))}</div>
+            <div class="indicator-value">¥${fmtNum(Math.round(ev.evalValue))}</div>
           </div>
           <div style="text-align:right;">
             <div class="indicator-label">評価損益</div>
-            <div class="change ${plClass}">${pl > 0 ? '+' : ''}¥${fmtNum(Math.round(pl))} (${plPct > 0 ? '+' : ''}${plPct.toFixed(1)}%)</div>
+            <div class="change ${plClass}">${ev.pl > 0 ? '+' : ''}¥${fmtNum(Math.round(ev.pl))} (${ev.plPct > 0 ? '+' : ''}${ev.plPct.toFixed(1)}%)</div>
           </div>
         </div>
       `;
@@ -546,9 +560,13 @@ async function loadOrcan() {
   }
 }
 
-function refreshAll() {
+// ============================================================
+// 全体の読み込み
+// ============================================================
+
+async function refreshAll() {
   document.getElementById('updatedAt').textContent = new Date().toLocaleString('ja-JP') + ' 時点で表示';
-  loadStocks();
+  await loadStocks(); // 先に銘柄名を確定させてからニュースを引く
   loadStocksNews();
   loadOrcan();
   loadOrcanNews();
