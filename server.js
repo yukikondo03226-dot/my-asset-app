@@ -2,17 +2,20 @@
 // マイ資産アプリ バックエンドサーバー
 // ------------------------------------------------------------
 // このファイルが行うこと:
-//   1. 松井証券の公開株価ページから、保有している日本株の
+//   1. 保有銘柄・オルカンの保有状況を、サーバー側のファイル(data/holdings.json)
+//      に保存する。これにより、Safariで開いてもホーム画面のアイコンから
+//      開いても、いつも同じ内容が表示されます。
+//   2. 松井証券の公開株価ページから、保有している日本株の
 //      「今日に近い」株価・前日比・PER等を取得する
 //      (※非公式な方法です。下の「注意」を必ずお読みください)
-//   2. J-Quants から、同じ銘柄のPER/PBRの「約3ヶ月前時点」のデータを取得する
+//   3. J-Quants から、同じ銘柄のPER/PBRの「約3ヶ月前時点」のデータを取得する
 //      (長期的な指標の推移を見るための参考値として使います)
-//   3. 三菱UFJアセットマネジメントの公開APIから、オルカンの
+//   4. 三菱UFJアセットマネジメントの公開APIから、オルカンの
 //      基準価額・純資産総額などを取得する(こちらは最新・公式データ)
-//   4. NewsAPI から、保有銘柄や世界経済に関するニュース見出しを取得する
+//   5. NewsAPI から、保有銘柄や世界経済に関するニュース見出しを取得する
 //      (AIによる要約・推測は行わず、見出しの一覧のみを返します)
 //
-// ★重要な注意(1番について)
+// ★重要な注意(2番について)
 // 松井証券のページは公式にAPIを提供していないため、ページのHTMLを
 // 直接読み取る「非公式スクレイピング」という方法を使っています。
 //   - 正式に許可された使い方ではありません
@@ -21,8 +24,10 @@
 //     なるケースは少ないとされますが、リスクを理解した上でご利用ください
 //   - 動かなくなった場合はエラーメッセージを教えてください。一緒に直しましょう
 //
-// プログラミングが分からなくても大丈夫です。
-// 「STOCK_CODES」の部分だけ書き換えれば、保有銘柄を増減できます。
+// ★注意(1番について)
+// data/holdings.json は、サーバーの中に保存される普通のファイルです。
+// Renderの無料プランでは、長時間使われないと自動で作り直される(＝保存内容が
+// リセットされる)ことがあります。大事な数字は、念のためどこかにメモしておくと安心です。
 // ============================================================
 
 require('dotenv').config();
@@ -30,47 +35,60 @@ const express = require('express');
 const cors = require('cors');
 const cheerio = require('cheerio');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
 const JQUANTS_API_KEY = process.env.JQUANTS_API_KEY;
 const NEWSAPI_KEY = process.env.NEWSAPI_KEY;
 
-// ------------------------------------------------------------
-// 保有銘柄一覧(ここに追加・削除するだけで銘柄を増減できます)
-//   jquantsCode: J-Quants用の5桁コード(証券コードの末尾に0を付けたもの)
-//   yahooCode:   Yahoo!ファイナンス用の4桁の証券コード(そのまま)
-// ------------------------------------------------------------
-const STOCK_CODES = [
-  { jquantsCode: '72030', yahooCode: '7203', name: 'トヨタ自動車' },
-  { jquantsCode: '67580', yahooCode: '6758', name: 'ソニーグループ' },
-  { jquantsCode: '83060', yahooCode: '8306', name: '三菱UFJフィナンシャル・グループ' }
-];
-
 // オルカン(eMAXIS Slim 全世界株式(オール・カントリー))の協会コード
 const ORCAN_FUND_CODE = '0331418A';
 
 // ------------------------------------------------------------
-// 画面側(public/index.html)から ?codes=7203:トヨタ自動車|6758:ソニーグループ
-// のような形式で送られてきた銘柄リストを読み取ります。
-// 指定がなければ、上のSTOCK_CODES(初期の3銘柄)を使います。
+// 保有一覧表(サーバー側のファイルに保存します)
 // ------------------------------------------------------------
-function parseCodesParam(param) {
-  if (!param) return STOCK_CODES;
-  const parsed = param
-    .split('|')
-    .map((entry) => {
-      const [code, nameEncoded] = entry.split(':');
-      if (!code || !/^[0-9]{4}$/.test(code)) return null;
-      const name = nameEncoded ? decodeURIComponent(nameEncoded) : code;
-      // 証券コード(4桁)の末尾に0を付けるとJ-Quants用の5桁コードになります(通常株式の場合)
-      return { yahooCode: code, jquantsCode: `${code}0`, name };
-    })
-    .filter(Boolean);
-  return parsed.length > 0 ? parsed : STOCK_CODES;
+const DATA_DIR = path.join(__dirname, 'data');
+const HOLDINGS_FILE = path.join(DATA_DIR, 'holdings.json');
+
+const DEFAULT_HOLDINGS = {
+  stocks: [
+    { code: '7203', name: 'トヨタ自動車', shares: null, cost: null },
+    { code: '6758', name: 'ソニーグループ', shares: null, cost: null },
+    { code: '8306', name: '三菱UFJフィナンシャル・グループ', shares: null, cost: null }
+  ],
+  orcan: { principal: null, units: null }
+};
+
+function loadHoldings() {
+  try {
+    if (!fs.existsSync(HOLDINGS_FILE)) {
+      saveHoldings(DEFAULT_HOLDINGS);
+      return DEFAULT_HOLDINGS;
+    }
+    const raw = fs.readFileSync(HOLDINGS_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed.stocks)) return DEFAULT_HOLDINGS;
+    return parsed;
+  } catch (e) {
+    console.error('保有一覧表の読み込みに失敗しました:', e.message);
+    return DEFAULT_HOLDINGS;
+  }
+}
+
+function saveHoldings(data) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(HOLDINGS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+// 証券コード(4文字。数字だけでなく "212A" のような形式もあります)の末尾に
+// 0 を付けるとJ-Quants用のコードになります(通常株式の場合)
+function toJquantsCode(code) {
+  return `${code}0`;
 }
 
 // 日付を YYYYMMDD 形式の文字列にする小さな道具
@@ -85,6 +103,7 @@ function toYyyymmdd(date) {
 // 少し過去にさかのぼった期間を指定して、その中の一番新しいものを使います。
 // ------------------------------------------------------------
 async function fetchLongTermIndicator(code) {
+  const jquantsCode = toJquantsCode(code);
   const today = new Date();
   const to = new Date(today);
   to.setDate(to.getDate() - 84); // 12週間(84日)前
@@ -97,7 +116,7 @@ async function fetchLongTermIndicator(code) {
   const headers = { 'x-api-key': JQUANTS_API_KEY };
 
   const valuationRes = await fetch(
-    `https://api.jquants.com/v2/equities/valuation?code=${code}&from=${fromStr}&to=${toStr}`,
+    `https://api.jquants.com/v2/equities/valuation?code=${jquantsCode}&from=${fromStr}&to=${toStr}`,
     { headers }
   );
 
@@ -187,7 +206,6 @@ async function fetchOrcanData() {
   }
 
   const json = await res.json();
-  // 正しい場所が判明したので、ここから読み取ります
   const value = json?.datasets?.[0] || null;
 
   if (value) {
@@ -221,21 +239,94 @@ async function fetchNewsFor(keyword) {
 }
 
 // ============================================================
-// APIエンドポイント(スマホアプリ側からはこのURLを呼び出します)
+// 保有一覧表 API(追加・編集・削除)
+// ============================================================
+
+// 保有一覧表(銘柄+オルカン)をそのまま返す
+app.get('/api/holdings', (req, res) => {
+  res.json(loadHoldings());
+});
+
+// 銘柄を追加
+app.post('/api/holdings/stocks', (req, res) => {
+  const { code, name, shares, cost } = req.body || {};
+
+  if (!code || !/^[0-9A-Za-z]{4}$/.test(code)) {
+    return res.status(400).json({ error: '証券コードは4文字(数字・アルファベット)で入力してください' });
+  }
+  if (!name) {
+    return res.status(400).json({ error: '銘柄名を入力してください' });
+  }
+
+  const data = loadHoldings();
+  if (data.stocks.some((s) => s.code === code)) {
+    return res.status(400).json({ error: 'その証券コードはすでに追加されています' });
+  }
+
+  data.stocks.push({
+    code,
+    name,
+    shares: shares || null,
+    cost: cost || null
+  });
+  saveHoldings(data);
+  res.json(data);
+});
+
+// 銘柄の保有株数・取得単価を編集
+app.put('/api/holdings/stocks/:code', (req, res) => {
+  const { code } = req.params;
+  const { shares, cost } = req.body || {};
+
+  const data = loadHoldings();
+  const target = data.stocks.find((s) => s.code === code);
+  if (!target) {
+    return res.status(404).json({ error: '指定された銘柄が見つかりません' });
+  }
+
+  target.shares = shares || null;
+  target.cost = cost || null;
+  saveHoldings(data);
+  res.json(data);
+});
+
+// 銘柄を削除
+app.delete('/api/holdings/stocks/:code', (req, res) => {
+  const { code } = req.params;
+  const data = loadHoldings();
+  data.stocks = data.stocks.filter((s) => s.code !== code);
+  saveHoldings(data);
+  res.json(data);
+});
+
+// オルカンの保有状況(積立元本・保有口数)を保存
+app.put('/api/holdings/orcan', (req, res) => {
+  const { principal, units } = req.body || {};
+  const data = loadHoldings();
+  data.orcan = {
+    principal: principal || null,
+    units: units || null
+  };
+  saveHoldings(data);
+  res.json(data);
+});
+
+// ============================================================
+// データ取得 API(スマホアプリ側からはこのURLを呼び出します)
 // ============================================================
 
 // 保有株一覧: 松井証券ページの「今日に近い」株価 + J-Quantsの「約3ヶ月前」の指標
-// ?codes=7203:トヨタ自動車|6758:ソニーグループ のように渡すと、その銘柄を使います
+// + 保有株数・取得単価から計算した評価額・評価損益
 app.get('/api/stocks', async (req, res) => {
   try {
-    const stockList = parseCodesParam(req.query.codes);
+    const holdings = loadHoldings();
     const results = await Promise.all(
-      stockList.map(async (s) => {
+      holdings.stocks.map(async (s) => {
         // どちらかが失敗しても、もう片方の結果は返せるようにそれぞれ個別にtry/catchします
         let current = null;
         let currentError = null;
         try {
-          current = await scrapeStockPrice(s.yahooCode);
+          current = await scrapeStockPrice(s.code);
         } catch (err) {
           currentError = err.message;
         }
@@ -243,18 +334,34 @@ app.get('/api/stocks', async (req, res) => {
         let longTermIndicator = null;
         let longTermError = null;
         try {
-          longTermIndicator = await fetchLongTermIndicator(s.jquantsCode);
+          longTermIndicator = await fetchLongTermIndicator(s.code);
         } catch (err) {
           longTermError = err.message;
         }
 
+        // 保有株数・取得単価が入っていれば、評価額・評価損益を計算します
+        let evaluation = null;
+        if (s.shares && s.cost && current && current.close != null) {
+          const evalValue = s.shares * current.close;
+          const costValue = s.shares * s.cost;
+          const pl = evalValue - costValue;
+          evaluation = {
+            evalValue,
+            pl,
+            plPct: (pl / costValue) * 100
+          };
+        }
+
         return {
           name: s.name,
-          code: s.yahooCode,
+          code: s.code,
+          shares: s.shares,
+          cost: s.cost,
           current, // 今日に近い株価・PER/PBR(松井証券の公開ページ、非公式)
           currentError,
           longTermIndicator, // 約3ヶ月前時点のPER/PBR(J-Quants、公式・無料)
-          longTermError
+          longTermError,
+          evaluation // 評価額・評価損益(株数・取得単価がある場合のみ)
         };
       })
     );
@@ -265,11 +372,31 @@ app.get('/api/stocks', async (req, res) => {
   }
 });
 
-// オルカンの基準価額など
+// オルカンの基準価額など + 積立元本・保有口数から計算した評価額・評価損益
 app.get('/api/orcan', async (req, res) => {
   try {
+    const holdings = loadHoldings();
     const data = await fetchOrcanData();
-    res.json({ orcan: data.value, debugRaw: data.value ? undefined : data.raw });
+    const o = data.value;
+
+    let evaluation = null;
+    if (o && holdings.orcan && holdings.orcan.principal && holdings.orcan.units) {
+      // 基準価額は「1万口あたり」の金額なので、口数を1万で割ってから掛けます
+      const evalValue = (holdings.orcan.units / 10000) * o.nav;
+      const pl = evalValue - holdings.orcan.principal;
+      evaluation = {
+        evalValue,
+        pl,
+        plPct: (pl / holdings.orcan.principal) * 100
+      };
+    }
+
+    res.json({
+      orcan: o,
+      holding: holdings.orcan || { principal: null, units: null },
+      evaluation,
+      debugRaw: o ? undefined : data.raw
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -277,14 +404,10 @@ app.get('/api/orcan', async (req, res) => {
 });
 
 // ニュース見出し一覧(保有銘柄名 + 世界経済 + 日本株、それぞれ数件ずつ)
-// ?names=トヨタ自動車|ソニーグループ のように渡すと、その銘柄名で検索します
 app.get('/api/news', async (req, res) => {
   try {
-    const namesParam = req.query.names;
-    const stockNames = namesParam
-      ? namesParam.split('|').map((n) => decodeURIComponent(n)).filter(Boolean)
-      : STOCK_CODES.map((s) => s.name);
-    const keywords = [...stockNames, '日本株', '世界経済'];
+    const holdings = loadHoldings();
+    const keywords = [...holdings.stocks.map((s) => s.name), '日本株', '世界経済'];
     const results = {};
     for (const kw of keywords) {
       results[kw] = await fetchNewsFor(kw);
