@@ -109,6 +109,50 @@ function toYyyymmdd(date) {
 }
 
 // ------------------------------------------------------------
+// J-Quants Freeプランは「1分あたり5回まで」というリクエスト制限があります。
+// 銘柄数が増えても制限に引っかからないよう、J-Quantsへのリクエストは
+// この関数を必ず通して、間隔を空けながら順番に実行します。
+// ------------------------------------------------------------
+const JQUANTS_MIN_INTERVAL_MS = 13000; // 1分5回制限に対して余裕を持たせた間隔
+let jquantsChain = Promise.resolve();
+
+function fetchJQuants(url) {
+  const task = jquantsChain.then(async () => {
+    const res = await fetch(url, { headers: { 'x-api-key': JQUANTS_API_KEY } });
+    await new Promise((resolve) => setTimeout(resolve, JQUANTS_MIN_INTERVAL_MS));
+    return res;
+  });
+  // 次のリクエストは、これの成功・失敗にかかわらず順番を待ちます
+  jquantsChain = task.then(
+    () => {},
+    () => {}
+  );
+  return task;
+}
+
+// pagination_key が付いている間、続きのページを繰り返し取得してすべて集めます
+async function fetchJQuantsAllPages(baseUrl) {
+  let url = baseUrl;
+  let allData = [];
+  while (url) {
+    const res = await fetchJQuants(url);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`J-Quants取得エラー: ${res.status} ${text}`);
+    }
+    const json = await res.json();
+    allData = allData.concat(json.data || []);
+    if (json.pagination_key) {
+      const sep = baseUrl.includes('?') ? '&' : '?';
+      url = `${baseUrl}${sep}pagination_key=${encodeURIComponent(json.pagination_key)}`;
+    } else {
+      url = null;
+    }
+  }
+  return allData;
+}
+
+// ------------------------------------------------------------
 // J-Quants: 指定した銘柄コードの「約3ヶ月前時点」のPER/PBRを取得
 // これは「今日の値段」ではなく、指標の長期的な推移を見るための参考値です。
 // 無料プランでは直近12週間より前のデータしか取れないため、
@@ -125,20 +169,13 @@ async function fetchLongTermIndicator(code) {
   const fromStr = toYyyymmdd(from);
   const toStr = toYyyymmdd(to);
 
-  const headers = { 'x-api-key': JQUANTS_API_KEY };
-
-  const valuationRes = await fetch(
-    `https://api.jquants.com/v2/equities/valuation?code=${jquantsCode}&from=${fromStr}&to=${toStr}`,
-    { headers }
-  );
-
-  if (!valuationRes.ok) {
-    const text = await valuationRes.text();
-    throw new Error(`J-Quants 指標取得エラー(銘柄${code}): ${valuationRes.status} ${text}`);
-  }
-
-  const valuationJson = await valuationRes.json();
-  const valuationData = (valuationJson.data || []).slice().sort((a, b) => a.Date.localeCompare(b.Date));
+  const valuationData = (
+    await fetchJQuantsAllPages(
+      `https://api.jquants.com/v2/equities/valuation?code=${jquantsCode}&from=${fromStr}&to=${toStr}`
+    )
+  )
+    .slice()
+    .sort((a, b) => a.Date.localeCompare(b.Date));
   const latestValuation = valuationData[valuationData.length - 1];
 
   if (!latestValuation) {
@@ -166,18 +203,11 @@ async function fetchPriceHistory(code) {
 
   const fromStr = toYyyymmdd(from);
   const toStr = toYyyymmdd(to);
-  const headers = { 'x-api-key': JQUANTS_API_KEY };
 
-  const res = await fetch(
-    `https://api.jquants.com/v2/equities/bars/daily?code=${jquantsCode}&from=${fromStr}&to=${toStr}`,
-    { headers }
+  const data = await fetchJQuantsAllPages(
+    `https://api.jquants.com/v2/equities/bars/daily?code=${jquantsCode}&from=${fromStr}&to=${toStr}`
   );
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`J-Quants 株価履歴取得エラー(銘柄${code}): ${res.status} ${text}`);
-  }
-  const json = await res.json();
-  return (json.data || []).slice().sort((a, b) => a.Date.localeCompare(b.Date));
+  return data.slice().sort((a, b) => a.Date.localeCompare(b.Date));
 }
 
 // RSI(相対力指数)を計算する(Wilderの方法、期間14日が標準)
