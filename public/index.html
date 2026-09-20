@@ -94,6 +94,44 @@
     margin-bottom: 10px;
   }
   .loading { font-size: 12px; color: #8A8478; padding: 20px 0; text-align: center; }
+
+  .add-form {
+    background: #FFFFFF;
+    border: 1px dashed #B8B2A3;
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin: 24px 0;
+  }
+  .add-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .add-row input {
+    flex: 1;
+    min-width: 100px;
+    font-family: inherit;
+    font-size: 12px;
+    padding: 8px 10px;
+    border: 1px solid #E8E3D8;
+    border-radius: 8px;
+    background: #F4F1EA;
+  }
+  .add-row button {
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 8px 14px;
+    border: none;
+    border-radius: 8px;
+    background: #1C1B19;
+    color: #F4F1EA;
+  }
+  .remove-btn {
+    font-family: inherit;
+    font-size: 10px;
+    color: #9B4A3A;
+    background: none;
+    border: none;
+    padding: 4px 0;
+    margin-top: 8px;
+  }
 </style>
 </head>
 <body>
@@ -113,6 +151,21 @@
     <div class="section-title">保有銘柄</div>
     <div id="stocksList" class="loading">読み込み中...(サーバーが休止していた場合、起動に30秒ほどかかることがあります)</div>
 
+    <div class="add-form">
+      <div class="section-title" style="margin-top:0;">銘柄を追加</div>
+      <div class="add-row">
+        <input id="addCode" type="text" inputmode="numeric" maxlength="4" placeholder="証券コード(例: 9984)">
+        <input id="addName" type="text" placeholder="銘柄名(例: ソフトバンクグループ)">
+      </div>
+      <div class="add-row" style="margin-top:8px;">
+        <input id="addShares" type="text" inputmode="numeric" placeholder="保有株数(任意)">
+        <input id="addCost" type="text" inputmode="decimal" placeholder="取得単価(円・任意)">
+        <button onclick="addStock()">追加</button>
+      </div>
+      <div class="section-note" style="margin-top:8px;">株数・取得単価を入れると、評価損益も表示されます(あとで金額だけ変えたい場合は、カードの「編集」から変更できます)</div>
+      <div id="addError" class="error-box" style="display:none;"></div>
+    </div>
+
     <div class="section-title">関連ニュース見出し</div>
     <div class="section-note">※AIによる推測は行っていません。見出しの一覧です。</div>
     <div id="stocksNews" class="loading">読み込み中...</div>
@@ -122,6 +175,17 @@
     <div class="section-title">eMAXIS Slim 全世界株式(オール・カントリー)</div>
     <div id="orcanCard" class="loading">読み込み中...</div>
 
+    <div class="add-form">
+      <div class="section-title" style="margin-top:0;">保有状況を入力</div>
+      <div class="add-row">
+        <input id="orcanPrincipal" type="text" inputmode="numeric" placeholder="積立元本の合計(円)">
+        <input id="orcanUnits" type="text" inputmode="numeric" placeholder="保有口数(口)">
+        <button onclick="saveOrcanHolding()">保存</button>
+      </div>
+      <div class="section-note" style="margin-top:8px;">保有口数は証券会社のアプリ・取引報告書で確認できます。「基準価額」は1万口あたりの金額なので、計算は自動で行います。</div>
+      <div id="orcanError" class="error-box" style="display:none;"></div>
+    </div>
+
     <div class="section-title">世界経済ニュース見出し</div>
     <div class="section-note">※AIによる推測は行っていません。見出しの一覧です。</div>
     <div id="orcanNews" class="loading">読み込み中...</div>
@@ -129,6 +193,110 @@
 </main>
 
 <script>
+// ------------------------------------------------------------
+// 保有銘柄のリストは、このスマホ・ブラウザの中(localStorage)に保存します。
+// 他の端末とは共有されません。
+// ------------------------------------------------------------
+const DEFAULT_STOCKS = [
+  { code: '7203', name: 'トヨタ自動車', shares: null, cost: null },
+  { code: '6758', name: 'ソニーグループ', shares: null, cost: null },
+  { code: '8306', name: '三菱UFJフィナンシャル・グループ', shares: null, cost: null }
+];
+
+function getMyStocks() {
+  try {
+    const raw = localStorage.getItem('myStocks');
+    if (!raw) return DEFAULT_STOCKS;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : DEFAULT_STOCKS;
+  } catch (e) {
+    return DEFAULT_STOCKS;
+  }
+}
+
+function saveMyStocks(stocks) {
+  localStorage.setItem('myStocks', JSON.stringify(stocks));
+}
+
+function addStock() {
+  const codeEl = document.getElementById('addCode');
+  const nameEl = document.getElementById('addName');
+  const sharesEl = document.getElementById('addShares');
+  const costEl = document.getElementById('addCost');
+  const errEl = document.getElementById('addError');
+  const code = codeEl.value.trim();
+  const name = nameEl.value.trim();
+  const shares = sharesEl.value.trim() ? Number(sharesEl.value.trim()) : null;
+  const cost = costEl.value.trim() ? Number(costEl.value.trim()) : null;
+
+  errEl.style.display = 'none';
+
+  if (!/^[0-9]{4}$/.test(code)) {
+    errEl.textContent = '証券コードは4桁の数字で入力してください(例: 9984)';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (!name) {
+    errEl.textContent = '銘柄名を入力してください';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (sharesEl.value.trim() && (isNaN(shares) || shares <= 0)) {
+    errEl.textContent = '保有株数は正しい数字で入力してください';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (costEl.value.trim() && (isNaN(cost) || cost <= 0)) {
+    errEl.textContent = '取得単価は正しい数字で入力してください';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  const stocks = getMyStocks();
+  if (stocks.some((s) => s.code === code)) {
+    errEl.textContent = 'その証券コードはすでに追加されています';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  stocks.push({ code, name, shares, cost });
+  saveMyStocks(stocks);
+  codeEl.value = '';
+  nameEl.value = '';
+  sharesEl.value = '';
+  costEl.value = '';
+  refreshAll();
+}
+
+function editStock(code) {
+  const stocks = getMyStocks();
+  const target = stocks.find((s) => s.code === code);
+  if (!target) return;
+
+  const sharesInput = window.prompt('保有株数を入力してください(空欄でクリア)', target.shares ?? '');
+  if (sharesInput === null) return; // キャンセル
+  const costInput = window.prompt('取得単価(円)を入力してください(空欄でクリア)', target.cost ?? '');
+  if (costInput === null) return; // キャンセル
+
+  target.shares = sharesInput.trim() ? Number(sharesInput.trim()) : null;
+  target.cost = costInput.trim() ? Number(costInput.trim()) : null;
+
+  if ((target.shares !== null && (isNaN(target.shares) || target.shares <= 0)) ||
+      (target.cost !== null && (isNaN(target.cost) || target.cost <= 0))) {
+    alert('数字が正しくないため、変更を反映できませんでした');
+    return;
+  }
+
+  saveMyStocks(stocks);
+  refreshAll();
+}
+
+function removeStock(code) {
+  const stocks = getMyStocks().filter((s) => s.code !== code);
+  saveMyStocks(stocks);
+  refreshAll();
+}
+
 function switchTab(tab) {
   document.getElementById('tab-stocks').classList.toggle('active', tab === 'stocks');
   document.getElementById('tab-orcan').classList.toggle('active', tab === 'orcan');
@@ -148,10 +316,15 @@ function fmtChange(change, changePct) {
   return `${sign}${fmtNum(change)}${pctText}`;
 }
 
+function buildCodesParam(stocks) {
+  return stocks.map((s) => `${s.code}:${encodeURIComponent(s.name)}`).join('|');
+}
+
 async function loadStocks() {
   const el = document.getElementById('stocksList');
+  const stocks = getMyStocks();
   try {
-    const res = await fetch('/api/stocks');
+    const res = await fetch('/api/stocks?codes=' + encodeURIComponent(buildCodesParam(stocks)));
     const data = await res.json();
     if (!data.stocks) throw new Error('データの形式が想定と違います');
 
@@ -160,6 +333,30 @@ async function loadStocks() {
       const c = s.current || {};
       const lt = s.longTermIndicator || {};
       const changeClass = c.change > 0 ? 'up' : (c.change < 0 ? 'down' : '');
+
+      // localStorageに保存してある保有株数・取得単価をこの銘柄に合わせて探す
+      const holding = stocks.find((h) => h.code === s.code) || {};
+      let plHtml = '';
+      if (holding.shares && holding.cost && c.close != null) {
+        const evalValue = holding.shares * c.close;
+        const costValue = holding.shares * holding.cost;
+        const pl = evalValue - costValue;
+        const plPct = (pl / costValue) * 100;
+        const plClass = pl > 0 ? 'up' : (pl < 0 ? 'down' : '');
+        plHtml = `
+          <div class="divider"></div>
+          <div class="row">
+            <div>
+              <div class="indicator-label">評価額(${holding.shares}株)</div>
+              <div class="indicator-value">¥${fmtNum(Math.round(evalValue))}</div>
+            </div>
+            <div style="text-align:right;">
+              <div class="indicator-label">評価損益</div>
+              <div class="change ${plClass}">${pl > 0 ? '+' : ''}¥${fmtNum(Math.round(pl))} (${plPct > 0 ? '+' : ''}${plPct.toFixed(1)}%)</div>
+            </div>
+          </div>
+        `;
+      }
 
       const card = document.createElement('div');
       card.className = 'card';
@@ -188,6 +385,11 @@ async function loadStocks() {
           <div><div class="indicator-label">PER(${lt.asOfDate || '約3ヶ月前'})</div><div class="indicator-value">${lt.per != null ? lt.per + '倍' : '--'}</div></div>
           <div><div class="indicator-label">PBR(${lt.asOfDate || '約3ヶ月前'})</div><div class="indicator-value">${lt.pbr != null ? lt.pbr + '倍' : '--'}</div></div>
         </div>
+        ${plHtml}
+        <div class="row" style="margin-top:8px;">
+          <button class="remove-btn" onclick="editStock('${s.code}')">株数・取得単価を編集</button>
+          <button class="remove-btn" onclick="removeStock('${s.code}')">この銘柄を削除</button>
+        </div>
       `;
       el.appendChild(card);
     });
@@ -196,25 +398,20 @@ async function loadStocks() {
   }
 }
 
-async function loadNews(targetElId, keywords) {
-  const el = document.getElementById(targetElId);
+async function loadStocksNews() {
+  const el = document.getElementById('stocksNews');
+  const stocks = getMyStocks();
+  const namesParam = stocks.map((s) => encodeURIComponent(s.name)).join('|');
   try {
-    const res = await fetch('/api/news');
+    const res = await fetch('/api/news?names=' + namesParam);
     const data = await res.json();
     if (!data.news) throw new Error('データの形式が想定と違います');
 
     el.innerHTML = '';
-    keywords.forEach((kw) => {
-      const items = data.news[kw] || [];
+    stocks.forEach((s) => {
+      const items = data.news[s.name] || [];
       items.slice(0, 3).forEach((item) => {
-        const div = document.createElement('div');
-        div.className = 'news-item';
-        const date = item.publishedAt ? new Date(item.publishedAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-        div.innerHTML = `
-          <div class="news-title"><a href="${item.url}" target="_blank" rel="noopener">${item.title}</a></div>
-          <div class="news-meta">${item.source || ''}${date ? ' ・ ' + date : ''}</div>
-        `;
-        el.appendChild(div);
+        el.appendChild(renderNewsItem(item));
       });
     });
     if (!el.innerHTML) {
@@ -225,8 +422,78 @@ async function loadNews(targetElId, keywords) {
   }
 }
 
+function renderNewsItem(item) {
+  const div = document.createElement('div');
+  div.className = 'news-item';
+  const date = item.publishedAt ? new Date(item.publishedAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+  div.innerHTML = `
+    <div class="news-title"><a href="${item.url}" target="_blank" rel="noopener">${item.title}</a></div>
+    <div class="news-meta">${item.source || ''}${date ? ' ・ ' + date : ''}</div>
+  `;
+  return div;
+}
+
+async function loadOrcanNews() {
+  const el = document.getElementById('orcanNews');
+  try {
+    const res = await fetch('/api/news');
+    const data = await res.json();
+    if (!data.news) throw new Error('データの形式が想定と違います');
+
+    el.innerHTML = '';
+    const items = data.news['世界経済'] || [];
+    items.slice(0, 3).forEach((item) => el.appendChild(renderNewsItem(item)));
+    if (!el.innerHTML) {
+      el.innerHTML = '<div class="loading">関連ニュースが見つかりませんでした</div>';
+    }
+  } catch (err) {
+    el.innerHTML = `<div class="error-box">ニュースの取得に失敗しました: ${err.message}</div>`;
+  }
+}
+
+function getOrcanHolding() {
+  try {
+    const raw = localStorage.getItem('orcanHolding');
+    if (!raw) return { principal: null, units: null };
+    return JSON.parse(raw);
+  } catch (e) {
+    return { principal: null, units: null };
+  }
+}
+
+function saveOrcanHolding() {
+  const principalEl = document.getElementById('orcanPrincipal');
+  const unitsEl = document.getElementById('orcanUnits');
+  const errEl = document.getElementById('orcanError');
+  const principal = principalEl.value.trim() ? Number(principalEl.value.trim()) : null;
+  const units = unitsEl.value.trim() ? Number(unitsEl.value.trim()) : null;
+
+  errEl.style.display = 'none';
+  if (principalEl.value.trim() && (isNaN(principal) || principal <= 0)) {
+    errEl.textContent = '積立元本は正しい数字で入力してください';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (unitsEl.value.trim() && (isNaN(units) || units <= 0)) {
+    errEl.textContent = '保有口数は正しい数字で入力してください';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  localStorage.setItem('orcanHolding', JSON.stringify({ principal, units }));
+  loadOrcan();
+}
+
 async function loadOrcan() {
   const el = document.getElementById('orcanCard');
+  const holding = getOrcanHolding();
+
+  // 入力欄に、前回保存した値を表示しておく
+  const principalEl = document.getElementById('orcanPrincipal');
+  const unitsEl = document.getElementById('orcanUnits');
+  if (principalEl && !principalEl.matches(':focus')) principalEl.value = holding.principal ?? '';
+  if (unitsEl && !unitsEl.matches(':focus')) unitsEl.value = holding.units ?? '';
+
   try {
     const res = await fetch('/api/orcan');
     const data = await res.json();
@@ -234,6 +501,28 @@ async function loadOrcan() {
     if (!o) throw new Error('データが見つかりませんでした');
 
     const changeClass = Number(o.cmp_prev_day) > 0 ? 'up' : (Number(o.cmp_prev_day) < 0 ? 'down' : '');
+
+    let plHtml = '';
+    if (holding.principal && holding.units) {
+      // 基準価額は「1万口あたり」の金額なので、口数を1万で割ってから掛けます
+      const evalValue = (holding.units / 10000) * o.nav;
+      const pl = evalValue - holding.principal;
+      const plPct = (pl / holding.principal) * 100;
+      const plClass = pl > 0 ? 'up' : (pl < 0 ? 'down' : '');
+      plHtml = `
+        <div class="divider"></div>
+        <div class="row">
+          <div>
+            <div class="indicator-label">評価額(${fmtNum(holding.units)}口)</div>
+            <div class="indicator-value">¥${fmtNum(Math.round(evalValue))}</div>
+          </div>
+          <div style="text-align:right;">
+            <div class="indicator-label">評価損益</div>
+            <div class="change ${plClass}">${pl > 0 ? '+' : ''}¥${fmtNum(Math.round(pl))} (${plPct > 0 ? '+' : ''}${plPct.toFixed(1)}%)</div>
+          </div>
+        </div>
+      `;
+    }
 
     el.innerHTML = `
       <div class="card">
@@ -249,6 +538,7 @@ async function loadOrcan() {
           <div><div class="indicator-label">1年騰落率</div><div class="indicator-value">${o.percentage_change_1y}%</div></div>
           <div><div class="indicator-label">設定来騰落率</div><div class="indicator-value">${o.percentage_change_full}%</div></div>
         </div>
+        ${plHtml}
       </div>
     `;
   } catch (err) {
@@ -256,13 +546,15 @@ async function loadOrcan() {
   }
 }
 
-const STOCK_NAMES = ['トヨタ自動車', 'ソニーグループ', '三菱UFJフィナンシャル・グループ'];
+function refreshAll() {
+  document.getElementById('updatedAt').textContent = new Date().toLocaleString('ja-JP') + ' 時点で表示';
+  loadStocks();
+  loadStocksNews();
+  loadOrcan();
+  loadOrcanNews();
+}
 
-document.getElementById('updatedAt').textContent = new Date().toLocaleString('ja-JP') + ' 時点で表示';
-loadStocks();
-loadNews('stocksNews', STOCK_NAMES);
-loadOrcan();
-loadNews('orcanNews', ['世界経済']);
+refreshAll();
 </script>
 </body>
 </html>
