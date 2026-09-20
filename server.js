@@ -193,6 +193,63 @@ async function scrapeStockPrice(code) {
 }
 
 // ------------------------------------------------------------
+// 市場の経済指標: 日経平均(松井証券の指数ページ)とUSD/JPY(無料の為替API)
+// ------------------------------------------------------------
+async function scrapeNikkei() {
+  const url = 'https://finance.matsui.co.jp/stock/.N225/daily-bar/index';
+
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    }
+  });
+  if (!res.ok) {
+    throw new Error(`日経平均の取得に失敗しました: ${res.status}`);
+  }
+
+  const html = await res.text();
+  const $ = cheerio.load(html);
+  const bodyText = $('body').text().replace(/\s+/g, ' ');
+
+  const priceMatch = bodyText.match(/現在値\s*([0-9,]+\.?[0-9]*)/);
+  const changeMatch = bodyText.match(/前日比\s*[▲△▼]?\s*([+\-−]?[0-9,]+\.?[0-9]*)\s*\(\s*[▲△▼]?\s*([+\-−]?[0-9.]+)\s*%\s*\)/);
+
+  if (!priceMatch) {
+    throw new Error(`日経平均のページ構成が変わった可能性があります。このURL(${url})を開いて確認してください。`);
+  }
+
+  const toNumber = (s) => (s == null ? null : parseFloat(s.replace(/,/g, '').replace('−', '-')));
+
+  return {
+    label: '日経平均',
+    value: toNumber(priceMatch[1]),
+    change: changeMatch ? toNumber(changeMatch[1]) : null,
+    changePct: changeMatch ? toNumber(changeMatch[2]) : null
+  };
+}
+
+async function fetchUsdJpy() {
+  // APIキー不要・登録不要の無料の為替レートAPIです(毎日更新)
+  const url = 'https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json';
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`為替レートの取得に失敗しました: ${res.status}`);
+  }
+  const json = await res.json();
+  const rate = json && json.usd ? json.usd.jpy : null;
+  if (rate == null) {
+    throw new Error('為替レートのデータ形式が想定と違います');
+  }
+  return {
+    label: 'USD/JPY',
+    value: Math.round(rate * 100) / 100,
+    change: null,
+    changePct: null
+  };
+}
+
+// ------------------------------------------------------------
 // 三菱UFJアセットマネジメント公開API: オルカンの基準価額等を取得
 // このAPIはAPIキー不要で、登録も不要です。
 // ------------------------------------------------------------
@@ -401,6 +458,22 @@ app.get('/api/orcan', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// 市場の経済指標(日経平均・USD/JPY)
+app.get('/api/market', async (req, res) => {
+  const results = [];
+  try {
+    results.push(await scrapeNikkei());
+  } catch (err) {
+    results.push({ label: '日経平均', error: err.message });
+  }
+  try {
+    results.push(await fetchUsdJpy());
+  } catch (err) {
+    results.push({ label: 'USD/JPY', error: err.message });
+  }
+  res.json({ market: results });
 });
 
 // ニュース見出し一覧(保有銘柄名 + 世界経済 + 日本株、それぞれ数件ずつ)
