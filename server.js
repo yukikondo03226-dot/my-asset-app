@@ -153,6 +153,54 @@ async function fetchJQuantsAllPages(baseUrl) {
 }
 
 // ------------------------------------------------------------
+// J-Quantsのデータ(PER/PBR・テクニカル指標)は、画面を開くたびにリアル
+// タイムで取りに行くとレート制限のせいで応答がとても遅くなってしまいます。
+// そこで、バックグラウンドで定期的に(15分おきに)まとめて取得しておき、
+// 画面からのリクエストには「その時点でのキャッシュ」を即座に返す方式にします。
+// どのみちJ-Quantsのデータ自体が約3ヶ月前時点のものなので、多少の
+// タイムラグ(数分〜15分程度)があっても実用上問題ありません。
+// ------------------------------------------------------------
+const jquantsCache = new Map(); // code -> { longTerm, longTermError, technical, technicalError, updatedAt }
+
+async function refreshJQuantsCacheForCode(code) {
+  const entry = jquantsCache.get(code) || {};
+
+  try {
+    entry.longTerm = await fetchLongTermIndicator(code);
+    entry.longTermError = null;
+  } catch (err) {
+    entry.longTermError = err.message;
+  }
+
+  try {
+    const bars = await fetchPriceHistory(code);
+    entry.technical = computeTechnicals(bars);
+    entry.technicalError = entry.technical ? null : '計算に十分な期間のデータが取得できませんでした';
+  } catch (err) {
+    entry.technicalError = err.message;
+  }
+
+  entry.updatedAt = new Date().toISOString();
+  jquantsCache.set(code, entry);
+  return entry;
+}
+
+async function refreshJQuantsCacheAll() {
+  try {
+    const holdings = await loadHoldings();
+    for (const s of holdings.stocks) {
+      await refreshJQuantsCacheForCode(s.code);
+    }
+  } catch (err) {
+    console.error('J-Quantsキャッシュの更新に失敗しました:', err.message);
+  }
+}
+
+// サーバー起動時に1回実行し、その後は15分おきに自動更新します
+refreshJQuantsCacheAll();
+setInterval(refreshJQuantsCacheAll, 15 * 60 * 1000);
+
+// ------------------------------------------------------------
 // J-Quants: 指定した銘柄コードの「約3ヶ月前時点」のPER/PBRを取得
 // これは「今日の値段」ではなく、指標の長期的な推移を見るための参考値です。
 // 無料プランでは直近12週間より前のデータしか取れないため、
@@ -490,6 +538,10 @@ app.post('/api/holdings/stocks', async (req, res) => {
       cost: cost || null
     });
     await saveHoldings(data);
+    // 追加した銘柄のJ-Quantsデータを、15分待たずにすぐ裏側で取得し始めます
+    refreshJQuantsCacheForCode(code).catch((err) => {
+      console.error(`銘柄追加時のキャッシュ更新に失敗しました(${code}):`, err.message);
+    });
     res.json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -550,14 +602,15 @@ app.put('/api/holdings/orcan', async (req, res) => {
 // データ取得 API(スマホアプリ側からはこのURLを呼び出します)
 // ============================================================
 
-// 保有株一覧: 松井証券ページの「今日に近い」株価 + J-Quantsの「約3ヶ月前」の指標
+// 保有株一覧: 松井証券ページの「今日に近い」株価(リアルタイム取得)
+// + J-Quantsの「約3ヶ月前」の指標(バックグラウンドキャッシュから即座に返す)
 // + 保有株数・取得単価から計算した評価額・評価損益
 app.get('/api/stocks', async (req, res) => {
   try {
     const holdings = await loadHoldings();
     const results = await Promise.all(
       holdings.stocks.map(async (s) => {
-        // どちらかが失敗しても、もう片方の結果は返せるようにそれぞれ個別にtry/catchします
+        // 株価は松井証券のページからその都度リアルタイムで取得します(J-Quantsではないため)
         let current = null;
         let currentError = null;
         try {
@@ -566,13 +619,12 @@ app.get('/api/stocks', async (req, res) => {
           currentError = err.message;
         }
 
-        let longTermIndicator = null;
-        let longTermError = null;
-        try {
-          longTermIndicator = await fetchLongTermIndicator(s.code);
-        } catch (err) {
-          longTermError = err.message;
-        }
+        // PER/PBR(約3ヶ月前時点)はJ-Quantsのバックグラウンドキャッシュから読みます
+        const cached = jquantsCache.get(s.code);
+        const longTermIndicator = cached ? cached.longTerm : null;
+        const longTermError = cached
+          ? cached.longTermError
+          : 'まだデータを準備中です。追加してから数分後にもう一度開いてみてください。';
 
         // 保有株数・取得単価が入っていれば、評価額・評価損益を計算します
         let evaluation = null;
@@ -639,25 +691,21 @@ app.get('/api/orcan', async (req, res) => {
 });
 
 // テクニカル分析(RSI・移動平均線・出来高)※参考情報、売買の推奨ではありません
+// バックグラウンドキャッシュから即座に返します(J-Quantsへその場ではアクセスしません)
 app.get('/api/technicals', async (req, res) => {
   try {
     const holdings = await loadHoldings();
-    const results = await Promise.all(
-      holdings.stocks.map(async (s) => {
-        let technical = null;
-        let error = null;
-        try {
-          const bars = await fetchPriceHistory(s.code);
-          technical = computeTechnicals(bars);
-          if (!technical) {
-            error = '計算に十分な期間のデータが取得できませんでした';
-          }
-        } catch (err) {
-          error = err.message;
-        }
-        return { name: s.name, code: s.code, technical, error };
-      })
-    );
+    const results = holdings.stocks.map((s) => {
+      const cached = jquantsCache.get(s.code);
+      return {
+        name: s.name,
+        code: s.code,
+        technical: cached ? cached.technical : null,
+        error: cached
+          ? cached.technicalError
+          : 'まだデータを準備中です。追加してから数分後にもう一度開いてみてください。'
+      };
+    });
     res.json({ technicals: results });
   } catch (err) {
     console.error(err);
